@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use hub_core::Hub;
 use serde::Deserialize;
 use std::path::PathBuf;
+mod admin;
 
 #[derive(Parser)]
 #[command(about = "読み取り専用Markdown索引基盤")]
@@ -47,7 +48,10 @@ enum Command {
     Watch {
         project: String,
     },
-    Serve,
+    Serve {
+        #[arg(long)]
+        admin: bool,
+    },
 }
 
 #[tokio::main]
@@ -74,11 +78,11 @@ async fn main() -> Result<()> {
             hub.watch(&project)?;
             return Ok(());
         }
-        Command::Serve => {
+        Command::Serve { admin } => {
             drop(hub);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:3847").await?;
             println!("閲覧API: http://127.0.0.1:3847 （loopback限定）");
-            axum::serve(listener, router(args.data)).await?;
+            axum::serve(listener, app_router(args.data, admin)).await?;
             return Ok(());
         }
     };
@@ -94,7 +98,42 @@ fn router(data: PathBuf) -> Router {
         .route("/api/backlinks", get(backlinks))
         .route("/api/links", get(links))
         .route("/api/document-links", get(document_links))
+        .route("/api/stats", get(stats))
+        .route("/api/graph", get(graph))
         .with_state(data)
+}
+fn app_router(data: PathBuf, admin_enabled: bool) -> Router {
+    let app = router(data.clone()).route(
+        "/api/capabilities",
+        get(move || async move {
+            Json(serde_json::json!({"admin":admin_enabled,"folder_picker":cfg!(windows)}))
+        }),
+    );
+    if admin_enabled {
+        app.merge(admin::router(data))
+    } else {
+        app
+    }
+}
+async fn stats(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.stats(&p.project)?)?)
+    })
+    .await
+}
+async fn graph(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.graph(
+            &p.project,
+            if p.path.is_empty() {
+                None
+            } else {
+                Some(&p.path)
+            },
+            200,
+        )?)?)
+    })
+    .await
 }
 #[derive(Deserialize)]
 struct Parameters {
@@ -185,6 +224,23 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn default_server_does_not_expose_management_routes() {
+        let data = tempfile::tempdir().unwrap();
+        let app = app_router(data.path().to_path_buf(), false);
+        let response = app
+            .oneshot(
+                Request::post("/api/admin/remove")
+                    .header("origin", "http://127.0.0.1:5173")
+                    .header("x-hub-admin", "1")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{\"project\":\"demo\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
     #[tokio::test]
     async fn read_api_and_invalid_path() {
         let source = tempfile::tempdir().unwrap();

@@ -6,12 +6,12 @@
 - **Priority:** P1 — 安定世代の原子的公開とクラッシュ注入試験。
 - **Priority:** P1 — 実文書1万/5万/10万件、8KiB基準で性能・検索精度・メモリを評価。
 - **Priority:** P2 — Readerキャッシュ、解析バッチ、検索／文書一覧／Backlinksのページング。
-- **Priority:** P2 — frontmatter aliases、見出しID、完全再構築コマンド。
+- **Priority:** P2 — frontmatter aliases、見出しID、安定世代による完全再構築。
 
 ## Viewer / Desktop
 
-- **Priority:** P2 — 同名・孤立文書の集計、Sigma.js/Graphology局所グラフ。
-- **Priority:** P2 — Tauri 2アダプター、フォルダ選択、Windows配布。
+- **Priority:** P2 — 同名・孤立文書の集計、巨大グラフの集約表示、レイアウト改善。
+- **Priority:** P2 — Tauri 2アダプター、Windows配布。
 
 ## Team
 
@@ -19,6 +19,10 @@
 - **Priority:** P2 — 50～100人の混合閲覧負荷試験、バックアップ復旧手順。
 
 ## Completed
+
+- 画面からの新規プロジェクト登録、Windows標準フォルダ選択、自動Wiki表示、再作成、登録・生成索引の削除と再登録。
+- Sigma.js/Graphologyによる近傍／先頭文書群のリンク図、文書・リンク・未解決件数の表示。
+- 管理モード限定API、Origin／専用ヘッダー検証、削除と更新の競合防止、作成失敗時の取消。
 
 - 日本語要件・アーキテクチャ・マイルストーン・性能目標。
 - Rust Core、永続プロジェクト、Tantivy/SQLite、並列MD解析、WikiLink/Backlinks、差分更新、notify。

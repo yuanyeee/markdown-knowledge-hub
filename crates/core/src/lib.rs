@@ -1,11 +1,47 @@
 mod parser;
+mod projects;
 mod search;
 mod store;
 mod watch;
+pub use projects::*;
 pub use store::*;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_lifecycle_preserves_sources_and_recreation_is_fresh() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let raw = "# 注文\n[[customer]] [[missing]]";
+        std::fs::write(source.path().join("order.md"), raw).unwrap();
+        std::fs::write(source.path().join("customer.md"), "# 顧客").unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        assert_eq!(hub.stats("demo").unwrap().documents, 2);
+        assert_eq!(hub.stats("demo").unwrap().missing, 1);
+        let graph = hub.graph("demo", Some("order.md"), 2).unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        assert!(hub.graph("demo", None, 0).is_err());
+        assert_eq!(hub.graph("demo", None, 1).unwrap().nodes.len(), 1);
+        assert!(hub.graph("demo", None, 1).unwrap().truncated);
+        assert!(hub.graph("demo", Some("absent.md"), 10).is_err());
+        hub.rebuild("demo").unwrap();
+        hub.remove("demo").unwrap();
+        assert!(hub.projects().unwrap().is_empty());
+        assert!(!state.path().join("indexes/demo").exists());
+        assert_eq!(
+            std::fs::read_to_string(source.path().join("order.md")).unwrap(),
+            raw
+        );
+        std::fs::remove_file(source.path().join("customer.md")).unwrap();
+        hub.register("demo", "再作成", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        assert!(hub.search("demo", "顧客").unwrap().is_empty());
+        assert_eq!(hub.stats("demo").unwrap().documents, 1);
+        assert!(hub.remove("../escape").is_err());
+    }
     #[cfg(windows)]
     #[test]
     fn targeted_paths_cannot_duplicate_a_document_with_different_casing() {

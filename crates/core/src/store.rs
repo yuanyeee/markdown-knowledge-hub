@@ -46,8 +46,8 @@ pub struct LinkPage {
     pub next_offset: Option<usize>,
 }
 pub struct Hub {
-    data: PathBuf,
-    registry: Connection,
+    pub(crate) data: PathBuf,
+    pub(crate) registry: Connection,
 }
 struct Candidate {
     path: String,
@@ -76,6 +76,10 @@ impl Hub {
     }
     pub fn register(&mut self, id: &str, name: &str, root: &Path) -> Result<()> {
         Self::validate_id(id)?;
+        let _lock = self.project_lock(id, false)?;
+        if name.trim().is_empty() || name.len() > 300 {
+            bail!("プロジェクト名は1～300バイトで指定してください");
+        }
         let root = root.canonicalize().context("MDルートが存在しません")?;
         if !root.is_dir() || root.starts_with(&self.data) || self.data.starts_with(&root) {
             bail!("原本ルートと索引ディレクトリは独立させてください");
@@ -88,11 +92,18 @@ impl Hub {
                 root.to_str().context("ルートはUnicodeパスが必要です")?
             ],
         )?;
-        self.db(id)?;
-        self.search_index(id)?;
+        let initialized = self.db(id).and_then(|_| self.search_index(id).map(|_| ()));
+        if let Err(error) = initialized {
+            if let Err(cleanup) = self.remove_unlocked(id) {
+                eprintln!("登録失敗後の索引削除に失敗: {cleanup:#}");
+                self.registry
+                    .execute("DELETE FROM projects WHERE id=?1", [id])?;
+            }
+            return Err(error);
+        }
         Ok(())
     }
-    fn validate_id(id: &str) -> Result<()> {
+    pub(crate) fn validate_id(id: &str) -> Result<()> {
         if id.is_empty()
             || id.len() > 80
             || !id
@@ -128,11 +139,18 @@ impl Hub {
             |r| r.get::<_, String>(0),
         )?))
     }
-    fn dir(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn dir(&self, id: &str) -> Result<PathBuf> {
         self.root(id)?;
-        Ok(self.data.join("indexes").join(id))
+        let parent = self.data.join("indexes");
+        let dir = parent.join(id);
+        if (parent.exists() && parent.canonicalize()? != parent)
+            || (dir.exists() && dir.canonicalize()? != dir)
+        {
+            bail!("索引保存先のシンボリックリンク・別名は使用できません");
+        }
+        Ok(dir)
     }
-    fn db(&self, id: &str) -> Result<Connection> {
+    pub(crate) fn db(&self, id: &str) -> Result<Connection> {
         let dir = self.dir(id)?;
         std::fs::create_dir_all(&dir)?;
         let db = Connection::open(dir.join("metadata.sqlite"))?;
@@ -153,7 +171,7 @@ impl Hub {
         self.scan_verified(id, false)
     }
     pub fn scan_verified(&mut self, id: &str, verify: bool) -> Result<ScanReport> {
-        self.scan_scope(id, verify, None)
+        self.scan_scope(id, verify, None, false)
     }
     /// Reconcile exact relative Markdown file paths supplied by a file event.
     /// Unlike metadata-only scans, event updates always verify the content hash.
@@ -170,24 +188,19 @@ impl Hub {
         if paths.len() > 500 {
             return self.scan_verified(id, true);
         }
-        self.scan_scope(id, true, Some(&paths))
+        self.scan_scope(id, true, Some(&paths), false)
+    }
+    pub fn rebuild(&mut self, id: &str) -> Result<ScanReport> {
+        self.scan_scope(id, true, None, true)
     }
     fn scan_scope(
         &mut self,
         id: &str,
         verify: bool,
         paths: Option<&[String]>,
+        rebuild: bool,
     ) -> Result<ScanReport> {
-        let lock_path = self.dir(id)?;
-        std::fs::create_dir_all(&lock_path)?;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path.join("writer.lock"))?;
-        lock.try_lock()
-            .context("別プロセスが索引を更新しています")?;
+        let _lock = self.project_lock(id, false)?;
         let root = self.root(id)?;
         if !root.is_dir() {
             bail!("原本ルートにアクセスできません");
@@ -201,7 +214,8 @@ impl Hub {
             recovered: dirty,
             ..Default::default()
         };
-        if dirty {
+        if dirty || rebuild {
+            db.execute("UPDATE state SET value=1 WHERE key='dirty'", [])?;
             let mut s = db.prepare("SELECT path,title,body FROM docs")?;
             let all = s
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -406,6 +420,7 @@ impl Hub {
         Ok(report)
     }
     pub fn search(&self, id: &str, q: &str) -> Result<Vec<SearchHit>> {
+        let _lock = self.project_lock(id, true)?;
         if q.len() > 1024 {
             bail!("検索語が長すぎます");
         }
@@ -437,6 +452,7 @@ impl Hub {
             .collect()
     }
     pub fn document(&self, id: &str, path: &str) -> Result<Document> {
+        let _lock = self.project_lock(id, true)?;
         if Path::new(path)
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
@@ -456,6 +472,7 @@ impl Hub {
         )?)
     }
     pub fn backlinks(&self, id: &str, path: &str) -> Result<Vec<String>> {
+        let _lock = self.project_lock(id, true)?;
         let db = self.db(id)?;
         let mut s = db.prepare(
             "SELECT DISTINCT source FROM links WHERE resolved=?1 ORDER BY source LIMIT 500",
@@ -464,6 +481,7 @@ impl Hub {
             .collect::<rusqlite::Result<_>>()?)
     }
     pub fn links(&self, id: &str) -> Result<Vec<Link>> {
+        let _lock = self.project_lock(id, true)?;
         let db = self.db(id)?;
         let mut s = db.prepare(
             "SELECT source,target,resolved,status FROM links ORDER BY source,target LIMIT 5000",
@@ -485,6 +503,7 @@ impl Hub {
         offset: usize,
         limit: usize,
     ) -> Result<LinkPage> {
+        let _lock = self.project_lock(id, true)?;
         if !(1..=200).contains(&limit) || offset > i64::MAX as usize - limit {
             bail!("リンクのページ指定が不正です");
         }
