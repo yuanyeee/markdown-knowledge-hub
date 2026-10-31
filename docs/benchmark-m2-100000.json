@@ -1,0 +1,15 @@
+{
+  "backlinks_p95_ms": 2.8395,
+  "event_delta_p95_ms": 469.954,
+  "event_samples": 10,
+  "files": 100000,
+  "index_bytes": 123838974,
+  "initial_ms": 9887.8541,
+  "profile": "release",
+  "queries": 100,
+  "reader": "opened per request, OS cache warm",
+  "search_p95_ms": 51.752100000000006,
+  "single_delta_ms": 844.4279,
+  "source_bytes": 44877780,
+  "unchanged_scan_ms": 375.22630000000004
+}

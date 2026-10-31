@@ -61,6 +61,16 @@ fn main() -> Result<()> {
     let start = Instant::now();
     assert_eq!(hub.scan("bench")?.changed, 1);
     let delta_ms = elapsed(start);
+    let mut event_samples = vec![];
+    for n in 0..10 {
+        std::fs::write(
+            source.path().join("doc-0.md"),
+            format!("# 更新 {n}\nイベント差分の実測 [[doc-1.md]]"),
+        )?;
+        let start = Instant::now();
+        assert_eq!(hub.scan_paths("bench", &["doc-0.md".into()])?.changed, 1);
+        event_samples.push(elapsed(start));
+    }
     let index_bytes = walkdir::WalkDir::new(data.path())
         .into_iter()
         .filter_map(Result::ok)
@@ -71,7 +81,7 @@ fn main() -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "files":count,"source_bytes":bytes,"index_bytes":index_bytes,"initial_ms":initial_ms,"unchanged_scan_ms":unchanged_ms,
-            "single_delta_ms":delta_ms,"search_p95_ms":percentile(search),"backlinks_p95_ms":percentile(back),
+            "single_delta_ms":delta_ms,"event_delta_p95_ms":percentile(event_samples),"event_samples":10,"search_p95_ms":percentile(search),"backlinks_p95_ms":percentile(back),
             "queries":100,"reader":"opened per request, OS cache warm","profile":if cfg!(debug_assertions){"debug"}else{"release"}
         }))?
     );

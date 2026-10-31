@@ -31,6 +31,11 @@ enum Command {
         #[arg(long)]
         verify: bool,
     },
+    Update {
+        project: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
     Search {
         project: String,
         query: String,
@@ -57,6 +62,9 @@ async fn main() -> Result<()> {
         Command::Projects => serde_json::to_value(hub.projects()?)?,
         Command::Scan { project, verify } => {
             serde_json::to_value(hub.scan_verified(&project, verify)?)?
+        }
+        Command::Update { project, paths } => {
+            serde_json::to_value(hub.scan_paths(&project, &paths)?)?
         }
         Command::Search { project, query } => serde_json::to_value(hub.search(&project, &query)?)?,
         Command::Backlinks { project, path } => {
@@ -85,6 +93,7 @@ fn router(data: PathBuf) -> Router {
         .route("/api/document", get(document))
         .route("/api/backlinks", get(backlinks))
         .route("/api/links", get(links))
+        .route("/api/document-links", get(document_links))
         .with_state(data)
 }
 #[derive(Deserialize)]
@@ -94,6 +103,18 @@ struct Parameters {
     q: String,
     #[serde(default)]
     path: String,
+}
+#[derive(Deserialize)]
+struct LinkParameters {
+    project: String,
+    path: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_link_limit")]
+    limit: usize,
+}
+fn default_link_limit() -> usize {
+    100
 }
 type ApiResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
 async fn run(
@@ -144,6 +165,14 @@ async fn backlinks(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> 
 async fn links(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
     run(data, move |h| {
         Ok(serde_json::to_value(h.links(&p.project)?)?)
+    })
+    .await
+}
+async fn document_links(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(
+            h.links_page(&p.project, &p.path, p.offset, p.limit)?,
+        )?)
     })
     .await
 }
@@ -204,5 +233,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+    #[tokio::test]
+    async fn document_links_are_scoped_and_paginated() {
+        let source = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "[[b]] [[c]]").unwrap();
+        std::fs::write(source.path().join("b.md"), "[[a]]").unwrap();
+        let mut hub = Hub::open(data.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        let app = router(data.path().to_path_buf());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/document-links?project=demo&path=a.md&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["source"], "a.md");
+        assert_eq!(value["next_offset"], 1);
+        for query in [
+            "limit=0",
+            "limit=201",
+            "offset=-1",
+            "offset=18446744073709551615",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/document-links?project=demo&path=a.md&{query}"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 }

@@ -23,6 +23,8 @@ Rust stable（MSVC、Visual Studio C++ Build Tools）とNode.js 22以上を用�
 cargo build --workspace
 cargo run -p hub-app -- --data D:\KnowledgeHub\state add system-a "システムA" D:\Specifications\SystemA
 cargo run -p hub-app -- --data D:\KnowledgeHub\state scan system-a
+# 相対パスを指定して更新（変更・追加・削除済みファイル）
+cargo run -p hub-app -- --data D:\KnowledgeHub\state update system-a docs/order.md
 cargo run -p hub-app -- --data D:\KnowledgeHub\state search system-a 注文
 cargo run -p hub-app -- --data D:\KnowledgeHub\state watch system-a
 # watchとは別端末。索引更新プロセスは同時に1つだけ実行してください。
@@ -40,6 +42,10 @@ npm.cmd run dev
 表示されるローカルURLを開きます。APIは127.0.0.1:3847、Viteは127.0.0.1:5173。プロジェクト追加・スキャンは管理者CLIのみです。HTTPは閲覧専用、外部公開前にはIIS側の認証・認可とTLSを実装してください。現段階のAPIにはユーザー認証がありません。
 
 サンプルを試す場合は、リポジトリルートで`cargo run -p hub-app -- add demo "サンプル仕様" samples/specs`、続けて`cargo run -p hub-app -- scan demo`を実行できます。`serve`も同じデータディレクトリで起動してください。
+
+監視のファイル変更イベントは対象パスだけを更新します。追加・削除は全体のリンク候補を再評価し、フォルダ操作・監視エラー・再走査要求では全体scanに戻ります。60秒ごとの全体照合も実施します。`update`はファイル名の大小文字も実ファイルと同じ相対パスで指定してください。最大500パスまで対象限定で処理し、それを超える場合は全件ハッシュ検証に切り替わります。
+
+Reactの出リンクは文書別に100件ずつ取得するため、プロジェクト全体のリンク数が5,000件を超えても利用できます。「出リンクをさらに読み込む」で続きを表示します。本文内のリンク移動は取得済みの出リンクに対応します。
 
 ```powershell
 cargo fmt --all -- --check

@@ -2,10 +2,10 @@
 
 ## Core
 
-- **Priority:** P1 — イベント対象だけの差分更新とリンク再解決。10万件の単一差分1秒以内を目指す。
+- **Priority:** P2 — 追加・削除で影響を受けるリンクだけ再解決する。現在は追加・削除・フォルダ操作で全体再評価。
 - **Priority:** P1 — 安定世代の原子的公開とクラッシュ注入試験。
 - **Priority:** P1 — 実文書1万/5万/10万件、8KiB基準で性能・検索精度・メモリを評価。
-- **Priority:** P2 — Readerキャッシュ、解析バッチ、検索／文書／リンクのページング。
+- **Priority:** P2 — Readerキャッシュ、解析バッチ、検索／文書一覧／Backlinksのページング。
 - **Priority:** P2 — frontmatter aliases、見出しID、完全再構築コマンド。
 
 ## Viewer / Desktop
@@ -24,3 +24,6 @@
 - Rust Core、永続プロジェクト、Tantivy/SQLite、並列MD解析、WikiLink/Backlinks、差分更新、notify。
 - 管理CLI、閲覧API、React閲覧UI、多言語検索、テスト、Windows/Linux CI定義。
 - 合成1万/5万/10万ファイルのrelease実測。
+- ファイルイベントの対象パス更新、本文だけの変更時は該当文書の出リンクだけ再解決、監視キュー上限・定期照合。
+- 文書別出リンクのページングAPIとReact追加読み込み。全体5,000リンクの制限を閲覧経路から除去。
+- M2合成10万件: 対象更新P95約470ms、全体scan単一差分約844ms（Core測定）。

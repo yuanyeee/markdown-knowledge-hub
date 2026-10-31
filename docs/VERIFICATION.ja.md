@@ -2,7 +2,7 @@
 
 測定日: 2026-10-31。Windows、AMD Ryzen AI MAX+ 395（16コア/32スレッド）、メモリ約32GiB。Rust 1.99.1 MSVC。Dockerは使用していません。
 
-## 実施済み
+## M1 実施済み
 
 - Rust Core統合テスト4件とHTTP結合テスト1件: 成功。
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`: 成功。
@@ -36,14 +36,24 @@ cargo run --release -p hub-core --example benchmark -- 100000
 
 5万・10万件の生JSONもこのディレクトリに保存しています。
 
+## M2 前半の追加検証
+
+- Windows: Rust Core 10件とHTTP 2件、React 2件のテスト成功。LinuxではWindows大小文字試験に代わりシンボリックリンク祖先の拒否試験を実施。
+- 対象パスの更新・重複イベント、追加／削除での曖昧リンク変化、同一mtime・サイズでもイベント対象をハッシュ検証する動作、パス拒否を確認。
+- 文書別リンクのページ指定、不正limit／offset、プロジェクト全体の先頭5,000リンクより後にある文書をテスト。
+- 実ブラウザで5,000リンク超の一時プロジェクトを開き、出リンク100→200→205件の追加取得と本文WikiLinkによる移動を確認。
+- Windows notifyで文書変更後、changed=1／unchanged=0の対象限定更新ログと、新しい語句での検索結果を確認。
+- 同じ449バイト級の合成10万件で再測定: 初回索引9.888秒、無変更走査375.2ms、全体scan単一差分844.4ms、対象パス更新P95 470.0ms（10回）、検索P95 51.75ms、Backlinks P95 2.84ms。
+- 対象更新P95には監視の250ms待ち・イベント配送・HTTP・画面描画を含まない。10回の少数試行のため、実運用P95の保証には使わない。raw結果: [benchmark-m2-100000.json](benchmark-m2-100000.json)。
+
 ## 未完了・制約
 
 - Tauri 2アプリ、Windowsインストーラー、IISチーム公開、SSO/ACL/監査、TLS、同時利用試験。
 - Sigma.js + Graphologyによる局所／全体グラフ、同名／孤立文書の集計画面。
 - Frontmatter aliases、見出しIDの存在検証、画像・添付ファイル表示、`.markdown`拡張子、横断検索、AI/MCP。
-- 検索Readerキャッシュ、イベント対象だけの更新、解析バッチによるメモリ上限制御、世代単位の原子的公開、ジョブ管理、完全再構築CLI。
+- 検索Readerキャッシュ、追加・削除時のリンク影響範囲限定、解析バッチによるメモリ上限制御、世代単位の原子的公開、ジョブ管理、完全再構築CLI。
 - 元MDはUTF-8、1文書16MiB以下。読取失敗時はscan全体を中断。通常スキャンではサイズとmtimeが両方不変の変更を検出できないため`scan PROJECT --verify`を使用。
-- 文書一覧／検索は50件、Backlinksは500件、リンクAPIは5,000件まで。ページングは未実装。現在のUIはリンクAPIの範囲外の本文リンクを移動できません。
+- 文書一覧／検索は50件、Backlinksは500件まで。出リンクは文書別に100件ずつUIで追加取得（API最大200件）。本文内リンク移動は取得済み出リンクの範囲。旧全体リンクAPIは互換用の5,000件上限。更新中のページ横断スナップショットは未対応。
 - SQLiteとTantivy間に単一トランザクションはありません。クラッシュ後は次回scanで検索索引を再構築。scan完了前の閲覧に一時的不整合があり得ます。
 - 現時点は開発用Viteとloopback APIの組み合わせ。API単体はReactの本番ビルドを配信しません。チーム配信には静的配信、認証認可、レート制限と接続プールを追加する必要があります。
 - CIはWindows/Linux Rust検査とLinux React検査を定義。実行状況はGitHub Actions参照。

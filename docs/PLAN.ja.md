@@ -29,15 +29,17 @@ CoreはUI・HTTPに依存しない。管理設定は共通registry SQLite、文�
 
 SQLite更新は単一トランザクションでdirtyフラグと変更文書を確定。その後Tantivyにdelete/addしてcommit。正常終了時dirtyを解除する。途中で失敗した場合、次回scanでSQLiteの本文からTantivy全件を再構築し再実行可能にする。SQLiteとTantivyを跨ぐACIDは存在せず、クラッシュ直後の検索に一時的不整合があり得る。安定世代の原子的公開はM2で導入する。
 
-初期実装は変更時にリンク全体を再解決する。パス・stemの辞書で候補探索を行い、相対パス一致、ルートパス一致、ユニークstemの順に解決。曖昧なstemはambiguous、未存在はmissing。`[[target|label]]`、`[[target#heading]]`、通常の相対`.md`リンクに対応。コード中は解析対象から除外。外部URLはグラフ対象外。frontmatter alias・見出しIDの存在検証はM2。
+M2前半では本文だけの変更なら該当文書の出リンクだけを再解決する。追加・削除時はリンク全体を再評価し、結果が変わった行だけを書き換える。パス・stemの辞書で候補探索を行い、相対パス一致、ルートパス一致、ユニークstemの順に解決。曖昧なstemはambiguous、未存在はmissing。`[[target|label]]`、`[[target#heading]]`、通常の相対`.md`リンクに対応。コード中は解析対象から除外。外部URLはグラフ対象外。frontmatter alias・見出しIDの存在検証はM2後半。
 
 検索はUnicodeの1～2文字N-gramを使用し日本語・中国語・英語の基本的な部分一致を提供する。形態素解析や言語別ランキングとは異なる。単純AND検索を基本とし、高度な検索文法や英語語幹処理は別途評価する。
 
-notifyは変更イベントをまとめ、差分スキャンを起動する。取りこぼし対策に定期全メタデータ走査を行う。初期実装はイベントごとに全ディレクトリをメタデータ走査するため、10万件の1秒目標にはイベント対象のみの更新が必要。ネットワーク共有はPollingフォールバックを将来追加する。
+notifyは変更イベントを250msでまとめ、通常のファイル変更は対象パスのみ更新する。イベントキューは4,096件を上限とし、溢れた場合は全体照合する。フォルダ操作・rename・不明イベント・再走査要求・監視エラーも全体scanに戻す。取りこぼし対策に60秒ごとの全メタデータ走査を行う。イベント対象経路はmtimeが不変でもハッシュ照合する。ネットワーク共有はPollingフォールバックを将来追加する。
 
 ## API / UI
 
 GET /api/projects、/api/search?project=&q=、/api/document?project=&path=、/api/backlinks?project=&path=、/api/links?project=を提供。結果件数は上限を設ける。登録・再索引はCLIのみ。画面はプロジェクト選択、検索、結果、Markdown閲覧、Backlinksとリンク診断。HTML原文を有効にせずスクリプト混入を避ける。
+
+M2前半でGET /api/document-links?project=&path=&offset=0&limit=100を追加。limitは1～200、返却はitemsとnext_offset。ReactはこのAPIで文書の出リンクを追加取得する。旧/api/linksは互換用途で先頭5,000件の上限を維持する。安定索引内ではtarget/rowid順。更新中のページ横断スナップショットは未対応。
 
 Sigma.js + Graphologyの局所グラフはM3。全体グラフは10万ノードを一括返却せずサブシステム集約、局所200～500ノード、深さ・辺数制限、サーバー側ページングを採用。TauriはHTTP実装をコピーせずCoreのコマンドアダプターと共有Reactを使用する。
 

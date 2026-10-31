@@ -8,6 +8,7 @@ type Project = { id: string; name: string };
 type Hit = { path: string; title: string };
 type Doc = Hit & { markdown: string };
 type Link = { source: string; target: string; resolved: string | null; status: string };
+type LinkPage = { items: Link[]; next_offset: number | null };
 async function api<T>(endpoint: string, project = '', extras: Record<string, string> = {}): Promise<T> {
   const response = await fetch(`/api/${endpoint}?${new URLSearchParams({ project, ...extras })}`);
   const value = await response.json();
@@ -22,6 +23,7 @@ function App() {
   const [doc, setDoc] = useState<Doc | null>(null);
   const [backlinks, setBacklinks] = useState<string[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
+  const [nextLinkOffset, setNextLinkOffset] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
@@ -29,10 +31,10 @@ function App() {
   useEffect(() => {
     generation.current++;
     let active = true;
-    setDoc(null); setBacklinks([]); setLinks([]); setHits([]); setQ(''); setError('');
+    setDoc(null); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setHits([]); setQ(''); setError('');
     if (project) {
       setBusy(true);
-      Promise.all([api<Hit[]>('search', project), api<Link[]>('links', project)]).then(([h, l]) => { if (active) { setHits(h); setLinks(l); } })
+      api<Hit[]>('search', project).then(h => { if (active) setHits(h); })
         .catch(e => { if (active) setError(String(e)); }).finally(() => { if (active) setBusy(false); });
     }
     return () => { active = false; };
@@ -48,8 +50,18 @@ function App() {
     const current = ++generation.current;
     setError(''); setBusy(true);
     try {
-      const [d, b] = await Promise.all([api<Doc>('document', project, { path }), api<string[]>('backlinks', project, { path })]);
-      if (current === generation.current) { setDoc(d); setBacklinks(b); }
+      const [d, b, page] = await Promise.all([api<Doc>('document', project, { path }), api<string[]>('backlinks', project, { path }), api<LinkPage>('document-links', project, { path })]);
+      if (current === generation.current) { setDoc(d); setBacklinks(b); setLinks(page.items); setNextLinkOffset(page.next_offset); }
+    } catch (e) { if (current === generation.current) setError(String(e)); }
+    finally { if (current === generation.current) setBusy(false); }
+  }
+  async function moreLinks() {
+    if (!doc || nextLinkOffset === null || busy) return;
+    const current = generation.current;
+    setError(''); setBusy(true);
+    try {
+      const page = await api<LinkPage>('document-links', project, { path: doc.path, offset: String(nextLinkOffset) });
+      if (current === generation.current) { setLinks(l => [...l, ...page.items]); setNextLinkOffset(page.next_offset); }
     } catch (e) { if (current === generation.current) setError(String(e)); }
     finally { if (current === generation.current) setBusy(false); }
   }
@@ -73,7 +85,7 @@ function App() {
         },
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{doc.markdown}</Markdown></> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
-      <aside><h2>Backlinks</h2><p className="hint">この文書への参照</p>{backlinks.map(p => <button className="hit" key={p} onClick={() => void open(p)}>{p}</button>)}{!backlinks.length && <p>参照元はありません。</p>}<h2>出リンク</h2>{outgoing.map((l, i) => <div className="link" key={i}>{l.resolved ? <button className="inline" onClick={() => void open(l.resolved!)}>{l.target}</button> : <span>{l.target}<small> {l.status === 'ambiguous' ? '同名候補あり' : 'リンク先なし'}</small></span>}</div>)}<p className="hint">リンク取得上限5,000件。全体グラフ・同名／孤立文書の集計は後続工程です。</p></aside>
+      <aside><h2>Backlinks</h2><p className="hint">この文書への参照（上限500件）</p>{backlinks.map(p => <button className="hit" key={p} onClick={() => void open(p)}>{p}</button>)}{!backlinks.length && <p>参照元はありません。</p>}<h2>出リンク</h2>{outgoing.map((l, i) => <div className="link" key={i}>{l.resolved ? <button className="inline" onClick={() => void open(l.resolved!)}>{l.target}</button> : <span>{l.target}<small> {l.status === 'ambiguous' ? '同名候補あり' : 'リンク先なし'}</small></span>}</div>)}{nextLinkOffset !== null && <button disabled={busy} onClick={() => void moreLinks()}>出リンクをさらに読み込む</button>}<p className="hint">出リンクは文書ごとに100件ずつ取得します。全体グラフ・同名／孤立文書の集計は後続工程です。</p></aside>
     </div><footer>原本を変更せず、索引から閲覧しています。更新は管理CLIまたは監視プロセスで反映します。</footer>
   </div>;
 }

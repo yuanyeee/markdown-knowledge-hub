@@ -40,6 +40,11 @@ pub struct Link {
     pub resolved: Option<String>,
     pub status: String,
 }
+#[derive(Debug, Serialize)]
+pub struct LinkPage {
+    pub items: Vec<Link>,
+    pub next_offset: Option<usize>,
+}
 pub struct Hub {
     data: PathBuf,
     registry: Connection,
@@ -148,6 +153,31 @@ impl Hub {
         self.scan_verified(id, false)
     }
     pub fn scan_verified(&mut self, id: &str, verify: bool) -> Result<ScanReport> {
+        self.scan_scope(id, verify, None)
+    }
+    /// Reconcile exact relative Markdown file paths supplied by a file event.
+    /// Unlike metadata-only scans, event updates always verify the content hash.
+    pub fn scan_paths(&mut self, id: &str, paths: &[String]) -> Result<ScanReport> {
+        let mut paths = paths
+            .iter()
+            .map(|p| p.replace('\\', "/"))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            validate_relative_md(path)?;
+        }
+        paths.sort();
+        paths.dedup();
+        if paths.len() > 500 {
+            return self.scan_verified(id, true);
+        }
+        self.scan_scope(id, true, Some(&paths))
+    }
+    fn scan_scope(
+        &mut self,
+        id: &str,
+        verify: bool,
+        paths: Option<&[String]>,
+    ) -> Result<ScanReport> {
         let lock_path = self.dir(id)?;
         std::fs::create_dir_all(&lock_path)?;
         let lock = std::fs::OpenOptions::new()
@@ -181,8 +211,15 @@ impl Hub {
         }
         let mut old = HashMap::new();
         {
-            let mut s = db.prepare("SELECT path,size,mtime,hash FROM docs")?;
-            for row in s.query_map([], |r| {
+            let sql = match paths {
+                Some(paths) => format!(
+                    "SELECT path,size,mtime,hash FROM docs WHERE path IN ({})",
+                    vec!["?"; paths.len()].join(",")
+                ),
+                None => "SELECT path,size,mtime,hash FROM docs".to_string(),
+            };
+            let mut s = db.prepare(&sql)?;
+            for row in s.query_map(rusqlite::params_from_iter(paths.unwrap_or_default()), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     (
@@ -198,23 +235,60 @@ impl Hub {
         }
         let mut seen = HashSet::new();
         let mut candidates = vec![];
-        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-            let entry = entry?;
-            if !entry.file_type().is_file()
-                || !entry
-                    .path()
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-            {
-                continue;
+        let mut files = vec![];
+        if let Some(paths) = paths {
+            for path in paths {
+                // Check every ancestor as well as the file: a directory symlink
+                // must not turn an event into access outside the registered root.
+                let mut full = root.clone();
+                let mut missing = false;
+                for component in Path::new(path).components() {
+                    full.push(component);
+                    match std::fs::symlink_metadata(&full) {
+                        Ok(m) if m.file_type().is_symlink() => {
+                            bail!("シンボリックリンクは索引対象にできません: {path}")
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            missing = true;
+                            break;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                if missing {
+                    continue;
+                }
+                let m = std::fs::metadata(&full)?;
+                if !m.is_file() {
+                    bail!("ファイル以外の変更は全体scanを使用してください: {path}");
+                }
+                // Windows opens case variants of the same file. Keep the SQLite
+                // path identity exact rather than inserting a second document.
+                if full.canonicalize()? != full {
+                    bail!("実ファイルと同じ表記の相対パスを指定してください: {path}");
+                }
+                files.push((full, m));
             }
-            let full = entry.path().to_path_buf();
+        } else {
+            for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+                let entry = entry?;
+                if entry.file_type().is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+                {
+                    files.push((entry.path().to_path_buf(), entry.metadata()?));
+                }
+            }
+        }
+        for (full, m) in files {
             let path = full
                 .strip_prefix(&root)?
                 .to_str()
                 .context("Unicodeパスが必要です")?
                 .replace('\\', "/");
-            let m = entry.metadata()?;
             let mtime = m
                 .modified()?
                 .duration_since(UNIX_EPOCH)?
@@ -270,7 +344,12 @@ impl Hub {
             return Ok(report);
         }
         let tx = db.transaction()?;
-        tx.execute("UPDATE state SET value=1 WHERE key='dirty'", [])?;
+        let content_changed = report.changed > 0 || !deleted.is_empty();
+        let topology_changed =
+            !deleted.is_empty() || changes.iter().any(|c| !old.contains_key(&c.path));
+        if content_changed {
+            tx.execute("UPDATE state SET value=1 WHERE key='dirty'", [])?;
+        }
         for path in &deleted {
             tx.execute("DELETE FROM docs WHERE path=?1", [path])?;
             tx.execute("DELETE FROM links WHERE source=?1", [path])?;
@@ -305,10 +384,25 @@ impl Hub {
                 )?;
             }
         }
-        resolve(&tx)?;
+        if content_changed {
+            let sources = documents
+                .iter()
+                .map(|(path, _, _)| path.clone())
+                .collect::<Vec<_>>();
+            resolve(
+                &tx,
+                if topology_changed {
+                    None
+                } else {
+                    Some(&sources)
+                },
+            )?;
+        }
         tx.commit()?;
-        index.update(false, &deleted, &documents)?;
-        db.execute("UPDATE state SET value=0 WHERE key='dirty'", [])?;
+        if content_changed {
+            index.update(false, &deleted, &documents)?;
+            db.execute("UPDATE state SET value=0 WHERE key='dirty'", [])?;
+        }
         Ok(report)
     }
     pub fn search(&self, id: &str, q: &str) -> Result<Vec<SearchHit>> {
@@ -384,29 +478,35 @@ impl Hub {
         })?
         .collect::<rusqlite::Result<_>>()?)
     }
-    pub fn watch(&mut self, id: &str) -> Result<()> {
-        use notify::Watcher;
-        let (send, recv) = std::sync::mpsc::channel();
-        let mut watcher = notify::recommended_watcher(move |event| {
-            let _ = send.send(event);
-        })?;
-        watcher.watch(&self.root(id)?, notify::RecursiveMode::Recursive)?;
-        self.scan(id)?;
-        loop {
-            match recv.recv_timeout(Duration::from_secs(60)) {
-                Ok(Ok(_)) => {
-                    std::thread::sleep(Duration::from_millis(250));
-                    while recv.try_recv().is_ok() {}
-                }
-                Ok(Err(e)) => eprintln!("監視エラー: {e}"),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(e) => return Err(e.into()),
-            }
-            match self.scan(id) {
-                Ok(r) => println!("{}", serde_json::to_string(&r)?),
-                Err(e) => eprintln!("差分更新失敗（次回再試行）: {e:#}"),
-            }
+    pub fn links_page(
+        &self,
+        id: &str,
+        source: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LinkPage> {
+        if !(1..=200).contains(&limit) || offset > i64::MAX as usize - limit {
+            bail!("リンクのページ指定が不正です");
         }
+        validate_relative_md(source)?;
+        let db = self.db(id)?;
+        let mut s = db.prepare("SELECT source,target,resolved,status FROM links WHERE source=?1 ORDER BY target,rowid LIMIT ?2 OFFSET ?3")?;
+        let mut items = s
+            .query_map(params![source, (limit + 1) as i64, offset as i64], |r| {
+                Ok(Link {
+                    source: r.get(0)?,
+                    target: r.get(1)?,
+                    resolved: r.get(2)?,
+                    status: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let next_offset = (items.len() > limit).then_some(offset + limit);
+        items.truncate(limit);
+        Ok(LinkPage { items, next_offset })
+    }
+    pub fn watch(&mut self, id: &str) -> Result<()> {
+        crate::watch::run(self, id)
     }
 }
 
@@ -423,7 +523,52 @@ fn normalize(path: &str) -> Option<String> {
     }
     Some(parts.join("/"))
 }
-fn resolve(db: &Connection) -> Result<()> {
+fn validate_relative_md(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.contains([':', '\0'])
+        || path
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == "..")
+        || Path::new(path)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        || !Path::new(path)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+    {
+        bail!("ルート内のMarkdown相対パスを指定してください");
+    }
+    Ok(())
+}
+fn resolve(db: &Connection, sources: Option<&[String]>) -> Result<()> {
+    // Large batches use one full pass rather than exceeding SQLite's bind limit.
+    let sources = sources.filter(|sources| sources.len() <= 500);
+    let sql = match sources {
+        Some(sources) => format!(
+            "SELECT rowid,source,target,resolved,status FROM links WHERE source IN ({})",
+            vec!["?"; sources.len()].join(",")
+        ),
+        None => "SELECT rowid,source,target,resolved,status FROM links".to_string(),
+    };
+    let links = {
+        let mut s = db.prepare(&sql)?;
+        s.query_map(
+            rusqlite::params_from_iter(sources.unwrap_or_default()),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if links.is_empty() {
+        return Ok(());
+    }
     let paths: HashSet<String> = {
         let mut s = db.prepare("SELECT path FROM docs")?;
         s.query_map([], |r| r.get(0))?
@@ -435,12 +580,8 @@ fn resolve(db: &Connection) -> Result<()> {
             stems.entry(stem.to_string()).or_default().push(p.clone());
         }
     }
-    let links: Vec<(i64, String, String)> = {
-        let mut s = db.prepare("SELECT rowid,source,target FROM links")?;
-        s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?
-    };
-    for (row, source, target) in links {
+    let mut update = db.prepare_cached("UPDATE links SET resolved=?2,status=?3 WHERE rowid=?1")?;
+    for (row, source, target, previous, previous_status) in links {
         let target = percent_encoding::percent_decode_str(target.split('#').next().unwrap_or(""))
             .decode_utf8_lossy()
             .replace('\\', "/");
@@ -470,10 +611,9 @@ fn resolve(db: &Connection) -> Result<()> {
         } else {
             "missing"
         };
-        db.execute(
-            "UPDATE links SET resolved=?2,status=?3 WHERE rowid=?1",
-            params![row, resolved, status],
-        )?;
+        if previous != resolved || previous_status != status {
+            update.execute(params![row, resolved, status])?;
+        }
     }
     Ok(())
 }
