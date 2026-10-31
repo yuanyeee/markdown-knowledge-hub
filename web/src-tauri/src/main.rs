@@ -1,0 +1,92 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tauri::{Manager, State};
+struct DesktopState {
+    data: Arc<Mutex<PathBuf>>,
+}
+fn data_override(args: &[String]) -> Result<Option<PathBuf>, std::io::Error> {
+    let Some(index) = args.iter().position(|a| a == "--data-dir") else {
+        return Ok(None);
+    };
+    let path = args
+        .get(index + 1)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--data-dirには保存先の絶対パスを指定してください",
+            )
+        })?;
+    Ok(Some(path))
+}
+
+#[tauri::command]
+async fn hub_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, DesktopState>,
+    operation: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let url = window.url().map_err(|e| e.to_string())?;
+    let bundled = url.scheme() == "tauri"
+        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"));
+    let development =
+        cfg!(debug_assertions) && url.host_str() == Some("127.0.0.1") && url.port() == Some(5173);
+    if window.label() != "main" || (!bundled && !development) {
+        return Err("アプリ内の画面から操作してください".into());
+    }
+    let data = state.data.clone();
+    tauri::async_runtime::spawn_blocking(move||{
+        if operation=="admin/pick-folder" {
+            return Ok(serde_json::json!({"path":rfd::FileDialog::new().set_title("Markdownフォルダを選択してください").pick_folder().map(|p|p.to_string_lossy().into_owned())}));
+        }
+        let path=data.lock().map_err(|_|"アプリを再起動してください".to_string())?;
+        if operation=="capabilities" {
+            return Ok(serde_json::json!({"admin":true,"folder_picker":true,"desktop":true,"data_dir":path.to_string_lossy()}));
+        }
+        let mut hub=hub_core::Hub::open(&path).map_err(|e|e.to_string())?;
+        hub_service::call(&mut hub,&operation,&args).map_err(|e|e.to_string())
+    }).await.map_err(|e|e.to_string())?
+}
+
+fn main() {
+    let result = tauri::Builder::default()
+        .setup(|app| {
+            let args: Vec<_> = std::env::args().collect();
+            let data = data_override(&args)?.unwrap_or(app.path().app_local_data_dir()?);
+            hub_core::Hub::open(&data)?;
+            app.manage(DesktopState {
+                data: Arc::new(Mutex::new(data)),
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![hub_request])
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        rfd::MessageDialog::new()
+            .set_title("Markdown Knowledge Hub 起動エラー")
+            .set_description(error.to_string())
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn storage_override_requires_an_explicit_absolute_path() {
+        assert!(data_override(&["app.exe".into()]).unwrap().is_none());
+        assert!(data_override(&["app.exe".into(), "--data-dir".into()]).is_err());
+        assert!(data_override(&["--data-dir".into(), "relative".into()]).is_err());
+        assert_eq!(
+            data_override(&["--data-dir".into(), r"D:\HubState".into()]).unwrap(),
+            Some(PathBuf::from(r"D:\HubState"))
+        );
+    }
+}

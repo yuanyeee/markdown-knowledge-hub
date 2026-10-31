@@ -2,6 +2,7 @@ import { useEffect,useRef,useState } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
 import { layoutNodes, type GraphNode } from './graph';
+import { read } from './transport';
 type Data={nodes:GraphNode[];edges:{source:string;target:string}[];truncated:boolean};
 export function GraphView({project,center,onOpen}:{project:string;center?:string;onOpen:(path:string)=>void}) {
   const [data,setData]=useState<Data|null>(null);
@@ -10,7 +11,7 @@ export function GraphView({project,center,onOpen}:{project:string;center?:string
   const open=useRef(onOpen); open.current=onOpen;
   useEffect(()=>{
     let active=true; setData(null); setError('');
-    fetch(`/api/graph?${new URLSearchParams({project,path:center||''})}`).then(async r=>{const value=await r.json();if(!r.ok)throw new Error(value.error);return value as Data;}).then(v=>{if(active)setData(v);}).catch(e=>{if(active)setError(String(e));});
+    read<Data>('graph',project,{path:center||''}).then(v=>{if(active)setData(v);}).catch(e=>{if(active)setError(String(e));});
     return()=>{active=false;};
   },[project,center]);
   useEffect(()=>{

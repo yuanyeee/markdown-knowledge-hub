@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import Markdown from 'react-markdown';
 import { remarkWiki, sameTarget } from './wiki';
 import './style.css';
+import { read as api } from './transport';
 import { ProjectManager } from './ProjectManager';
 const GraphView=lazy(()=>import('./GraphView').then(module=>({default:module.GraphView})));
 
@@ -11,12 +12,6 @@ type Hit = { path: string; title: string };
 type Doc = Hit & { markdown: string };
 type Link = { source: string; target: string; resolved: string | null; status: string };
 type LinkPage = { items: Link[]; next_offset: number | null };
-async function api<T>(endpoint: string, project = '', extras: Record<string, string> = {}): Promise<T> {
-  const response = await fetch(`/api/${endpoint}?${new URLSearchParams({ project, ...extras })}`);
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error || '接続できませんでした');
-  return value as T;
-}
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState('');
@@ -28,7 +23,7 @@ function App() {
   const [nextLinkOffset, setNextLinkOffset] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [capabilities,setCapabilities]=useState({admin:false,folder_picker:false});
+  const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean;data_dir?:string}>({admin:false,folder_picker:false});
   const [stats,setStats]=useState<{documents:number;links:number;missing:number;ambiguous:number}|null>(null);
   const [view,setView]=useState<'wiki'|'graph'>('wiki');
   const [revision,setRevision]=useState(0);
@@ -88,7 +83,7 @@ function App() {
   }
   const outgoing = links.filter(l => l.source === doc?.path);
   return <div className="app">
-    <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
+    <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
     <section className="toolbar" aria-label="検索条件">
       <label>プロジェクト<select disabled={busy} value={project} onChange={e => setProject(e.target.value)}><option value="" disabled>プロジェクトを選択</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
       <form onSubmit={e => { e.preventDefault(); void search(); }}><label htmlFor="query">全文検索</label><div className="search"><input id="query" value={q} onChange={e => setQ(e.target.value)} placeholder="キーワードを入力（日本語・中文・English）"/><button disabled={!project || busy}>検索</button></div></form>
@@ -110,7 +105,7 @@ function App() {
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{doc.markdown}</Markdown></> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
       <aside><h2>Backlinks</h2><p className="hint">この文書への参照（上限500件）</p>{backlinks.map(p => <button className="hit" key={p} onClick={() => void open(p)}>{p}</button>)}{!backlinks.length && <p>参照元はありません。</p>}<h2>出リンク</h2>{outgoing.map((l, i) => <div className="link" key={i}>{l.resolved ? <button className="inline" onClick={() => void open(l.resolved!)}>{l.target}</button> : <span>{l.target}<small> {l.status === 'ambiguous' ? '同名候補あり' : 'リンク先なし'}</small></span>}</div>)}{nextLinkOffset !== null && <button disabled={busy} onClick={() => void moreLinks()}>出リンクをさらに読み込む</button>}<p className="hint">出リンクは文書ごとに100件ずつ取得します。リンク図タブで文書間の関係を確認できます。</p></aside>
-    </div><footer>原本を変更せず、索引から閲覧しています。変更後は「再作成」または監視プロセスで反映できます。</footer>
+    </div><footer>原本を変更せず、索引から閲覧しています。変更後は「再作成」または監視プロセスで反映できます。{capabilities.desktop&&<div>データ保存先: {capabilities.data_dir}</div>}</footer>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

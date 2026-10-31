@@ -11,7 +11,7 @@
 ## Viewer / Desktop
 
 - **Priority:** P2 — 同名・孤立文書の集計、巨大グラフの集約表示、レイアウト改善。
-- **Priority:** P2 — Tauri 2アダプター、Windows配布。
+- **Priority:** P2 — Windowsコード署名、自動更新、インストール／アンインストール試験、Desktop内の常駐監視管理。
 
 ## Team
 
@@ -19,6 +19,10 @@
 - **Priority:** P2 — 50～100人の混合閲覧負荷試験、バックアップ復旧手順。
 
 ## Completed
+
+- Tauri 2 Windowsデスクトップ版、Core直接呼び出し（HTTP不要）、Webと共通React、単体exe・NSISインストーラー生成。
+- Desktopのフォルダ選択、Wiki、全文検索、リンク図、再作成、削除確認キャンセル、終了・再起動後の登録再利用を実機確認。
+- Web/Desktop共通のHTML削除確認ダイアログ、通信経路切替テスト、ローカルコンテンツに限定したDesktop操作。
 
 - 画面からの新規プロジェクト登録、Windows標準フォルダ選択、自動Wiki表示、再作成、登録・生成索引の削除と再登録。
 - Sigma.js/Graphologyによる近傍／先頭文書群のリンク図、文書・リンク・未解決件数の表示。

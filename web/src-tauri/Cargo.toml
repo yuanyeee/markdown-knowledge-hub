@@ -1,0 +1,21 @@
+[package]
+name = "markdown-knowledge-hub"
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+hub-core = { path = "../../crates/core" }
+hub-service = { path = "../../crates/service" }
+serde_json = "1"
+rfd = { version = "0.15", default-features = false }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

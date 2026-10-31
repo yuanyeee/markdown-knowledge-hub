@@ -5,3 +5,9 @@
 /bench-data/
 *.log
 *.tsbuildinfo
+/web/src-tauri/target/
+/web/src-tauri/gen/
+/web/src-tauri/icons/*
+!/web/src-tauri/icons/app.svg
+!/web/src-tauri/icons/icon.ico
+!/web/src-tauri/icons/icon.png

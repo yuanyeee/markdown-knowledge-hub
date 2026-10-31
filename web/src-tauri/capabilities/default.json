@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-local-window",
+  "description": "Only the bundled main window can use desktop capabilities.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

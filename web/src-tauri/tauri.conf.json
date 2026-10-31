@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Markdown Knowledge Hub",
+  "version": "0.1.0",
+  "identifier": "com.yuanyeee.markdownknowledgehub",
+  "build": {
+    "beforeDevCommand": "npm.cmd run dev",
+    "beforeBuildCommand": "npm.cmd run build",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "Markdown Knowledge Hub", "width": 1400, "height": 950, "minWidth": 850, "minHeight": 650 }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'self'",
+      "devCsp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "publisher": "yuanyeee",
+    "shortDescription": "読み取り専用Markdown Wiki・検索・リンク図",
+    "windows": { "nsis": { "displayLanguageSelector": true, "languages": ["Japanese", "English"] } }
+  }
+}

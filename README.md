@@ -13,7 +13,27 @@ Rust + Tantivyによる、複数プロジェクトのMarkdown検索・WikiLink�
 
 詳細は [設計・開発計画](docs/PLAN.ja.md)、実測結果と制約は [検証記録](docs/VERIFICATION.ja.md)。
 
-実装済み: プロジェクト登録・削除・再作成、差分更新、監視、全文検索、WikiLink/Backlinks、自動Wiki表示、Sigma.jsリンク図、CLI、ローカル管理API、React UI。未実装: Tauri配布、巨大グラフの集約表示、認証認可付きチーム公開。[残作業](TODOS.md)を参照してください。
+実装済み: Windowsデスクトップ版（Tauri 2）、Web版、プロジェクト登録・削除・再作成、差分更新、監視CLI、全文検索、WikiLink/Backlinks、自動Wiki表示、Sigma.jsリンク図。未実装: 巨大グラフの集約表示、安定世代の原子的公開、認証認可付きチーム公開。[残作業](TODOS.md)を参照してください。
+
+## Windowsデスクトップ版で使う
+
+Windows用セットアップexeを実行してアプリを起動するか、単体の`Markdown-Knowledge-Hub.exe`を起動します。PowerShell・Webブラウザ・HTTP API・Viteの手動起動は不要です。
+
+「新規プロジェクト」からMarkdownフォルダを登録するとWikiと検索索引を生成します。検索、Backlinks、リンク図、再作成・削除もアプリ内で操作できます。登録は終了後も保存されます。原本Markdownは変更しません。
+
+既定のデータ保存先は`%LOCALAPPDATA%\com.yuanyeee.markdownknowledgehub`。Web版の既定`.hub`とは別です。アプリ下部にも保存先を表示します。既存Web登録をそのまま使う場合は、アプリ起動時に`--data-dir "D:\既存の索引フォルダ"`を指定してください。原本Markdownフォルダではなくregistry.sqliteのある保存先を指定します。
+
+開発・配布ビルド（Windows、Rust/Node導入済み環境）:
+
+```powershell
+cd web
+npm.cmd ci
+npm.cmd run desktop:dev
+# 配布用exeとNSISインストーラーを生成:
+npm.cmd run desktop:build
+```
+
+出力先は`web/src-tauri/target/release/markdown-knowledge-hub.exe`と`web/src-tauri/target/release/bundle/nsis/*-setup.exe`。GitHub ActionsのDesktop jobにも配布artifactを保存します。現時点の配布物は未署名です。WebView2 Runtimeが必要で、NSISは未導入時にbootstrapperで取得する設定です。インストーラー自体のインストール／アンインストール試験は未実施です。[Desktop設計・制約](docs/DESKTOP.ja.md)も参照してください。
 
 ## Windowsで開始
 
@@ -76,7 +96,9 @@ npm.cmd run build
 ```text
 crates/core/       原本走査・解析・永続プロジェクト・リンク解決・検索
 crates/app/        管理CLI、監視、閲覧HTTP API
+crates/service/    DesktopからCoreを呼ぶ明示的な操作
 web/              React + TypeScript閲覧UI（Web/Tauri共用候補）
+web/src-tauri/     Tauri 2 Windowsホストとインストーラー設定
 scripts/          合成Markdown生成と性能測定
 docs/             日本語計画・検証記録・運用上の制約
 .github/workflows/ Windows/Linuxビルド・テスト

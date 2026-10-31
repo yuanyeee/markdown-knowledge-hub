@@ -33,3 +33,32 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+  desktop:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web/src-tauri -> target
+      - run: npm ci
+      - run: npm run desktop:build -- --ci -- --locked
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo test --release --manifest-path src-tauri/Cargo.toml --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Markdown-Knowledge-Hub-Windows
+          path: |
+            web/src-tauri/target/release/bundle/nsis/*-setup.exe
+            web/src-tauri/target/release/markdown-knowledge-hub.exe
+          if-no-files-found: error
