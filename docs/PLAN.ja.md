@@ -19,7 +19,7 @@ flowchart TD
   IIS[将来 IIS + TLS + 認証認可] -.-> API
 ```
 
-CoreはUI・HTTPに依存しない。管理設定は共通registry SQLite、文書・リンクはプロジェクト別metadata.sqlite、検索はsearch/。プロジェクトIDはASCII英数字・ハイフン・アンダースコアに限定し、ルートとデータディレクトリの重なりを拒否する。シンボリックリンクを追跡しない。読み取りAPIは索引済みパスをDBから参照し、任意ファイルを開かない。
+CoreはUI・HTTPに依存しない。管理設定は共通registry SQLite、文書・リンクはプロジェクト別metadata.sqlite、検索はsearch/。プロジェクトIDはASCII小文字英数字・ハイフン・アンダースコア（Windows予約名を除外）に限定し、ルートとデータディレクトリの重なりを拒否する。シンボリックリンクを追跡しない。読み取りAPIは索引済みパスをDBから参照し、任意ファイルを開かない。
 
 ## データと更新整合性
 
@@ -70,12 +70,12 @@ Sigma.js + Graphologyの局所グラフはM3。全体グラフは10万ノード�
 
 ## 実装順序と確認手順
 
-- [ ] Coreの統合テストを先に作り、空実装で失敗を確認。
-- [ ] 永続登録、並列解析、SQLite、Tantivy、リンク解決を実装し`cargo test -p hub-core`を成功させる。
-- [ ] CLI、notify、閲覧APIを追加し実際のHTTPを確認。
-- [ ] React UI、プロジェクト切替、本文表示とBacklinksを実装しproduction build。
-- [ ] Windows/Linux CI、合成測定スクリプトを追加。
-- [ ] fmt/test/clippy/UI build、性能実測を記録後コミット・非公開GitHubへpush。
+- [x] Coreの統合テストを先に作り、空実装で失敗を確認。
+- [x] 永続登録、並列解析、SQLite、Tantivy、リンク解決を実装し`cargo test -p hub-core`を成功させる。
+- [x] CLI、notify、閲覧APIを追加し実際のHTTPを確認。
+- [x] React UI、プロジェクト切替、本文表示とBacklinksを実装しproduction build。
+- [x] Windows/Linux CI、合成測定スクリプトを追加。
+- [x] fmt/test/clippy/UI build、性能実測を記録。コミット・pushはGit履歴を参照。
 
 ## 技術一次資料
 

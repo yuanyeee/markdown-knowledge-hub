@@ -1,0 +1,479 @@
+use crate::{parser, search::Search};
+use anyhow::{Context, Result, bail};
+use rayon::prelude::*;
+use rusqlite::{Connection, params};
+use serde::Serialize;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Component, Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
+};
+
+#[derive(Debug, Serialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub root: String,
+}
+#[derive(Debug, Serialize, Default)]
+pub struct ScanReport {
+    pub changed: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+    pub recovered: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct Document {
+    pub path: String,
+    pub title: String,
+    pub markdown: String,
+}
+#[derive(Debug, Serialize)]
+pub struct SearchHit {
+    pub path: String,
+    pub title: String,
+}
+#[derive(Debug, Serialize)]
+pub struct Link {
+    pub source: String,
+    pub target: String,
+    pub resolved: Option<String>,
+    pub status: String,
+}
+pub struct Hub {
+    data: PathBuf,
+    registry: Connection,
+}
+struct Candidate {
+    path: String,
+    full: PathBuf,
+    size: u64,
+    mtime: String,
+    previous: Option<String>,
+}
+struct Change {
+    path: String,
+    size: u64,
+    mtime: String,
+    hash: String,
+    raw: String,
+    parsed: Option<parser::Parsed>,
+}
+
+impl Hub {
+    pub fn open(data: &Path) -> Result<Self> {
+        std::fs::create_dir_all(data)?;
+        let data = data.canonicalize()?;
+        let registry = Connection::open(data.join("registry.sqlite"))?;
+        registry.busy_timeout(Duration::from_secs(10))?;
+        registry.execute_batch("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL);")?;
+        Ok(Self { data, registry })
+    }
+    pub fn register(&mut self, id: &str, name: &str, root: &Path) -> Result<()> {
+        Self::validate_id(id)?;
+        let root = root.canonicalize().context("MDルートが存在しません")?;
+        if !root.is_dir() || root.starts_with(&self.data) || self.data.starts_with(&root) {
+            bail!("原本ルートと索引ディレクトリは独立させてください");
+        }
+        self.registry.execute(
+            "INSERT INTO projects VALUES(?1,?2,?3)",
+            params![
+                id,
+                name,
+                root.to_str().context("ルートはUnicodeパスが必要です")?
+            ],
+        )?;
+        self.db(id)?;
+        self.search_index(id)?;
+        Ok(())
+    }
+    fn validate_id(id: &str) -> Result<()> {
+        if id.is_empty()
+            || id.len() > 80
+            || !id
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_')
+            || matches!(id, "con" | "prn" | "aux" | "nul")
+            || (id.len() == 4
+                && (id.starts_with("com") || id.starts_with("lpt"))
+                && matches!(id.as_bytes()[3], b'1'..=b'9'))
+        {
+            bail!("プロジェクトIDは小文字英数字・-・_のみ。Windows予約名は指定できません");
+        }
+        Ok(())
+    }
+    pub fn projects(&self) -> Result<Vec<Project>> {
+        let mut s = self
+            .registry
+            .prepare("SELECT id,name,root FROM projects ORDER BY name")?;
+        Ok(s.query_map([], |r| {
+            Ok(Project {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                root: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn root(&self, id: &str) -> Result<PathBuf> {
+        Self::validate_id(id)?;
+        Ok(PathBuf::from(self.registry.query_row(
+            "SELECT root FROM projects WHERE id=?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )?))
+    }
+    fn dir(&self, id: &str) -> Result<PathBuf> {
+        self.root(id)?;
+        Ok(self.data.join("indexes").join(id))
+    }
+    fn db(&self, id: &str) -> Result<Connection> {
+        let dir = self.dir(id)?;
+        std::fs::create_dir_all(&dir)?;
+        let db = Connection::open(dir.join("metadata.sqlite"))?;
+        db.busy_timeout(Duration::from_secs(10))?;
+        db.execute_batch("PRAGMA journal_mode=WAL;
+          CREATE TABLE IF NOT EXISTS docs(path TEXT PRIMARY KEY,size INTEGER,mtime TEXT,hash TEXT,title TEXT,body TEXT,raw TEXT);
+          CREATE TABLE IF NOT EXISTS links(source TEXT,target TEXT,resolved TEXT,status TEXT);
+          CREATE INDEX IF NOT EXISTS links_resolved ON links(resolved);
+          CREATE INDEX IF NOT EXISTS links_source ON links(source);
+          CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value INTEGER);
+          INSERT OR IGNORE INTO state VALUES('dirty',0);")?;
+        Ok(db)
+    }
+    fn search_index(&self, id: &str) -> Result<Search> {
+        Search::open(&self.dir(id)?.join("search"))
+    }
+    pub fn scan(&mut self, id: &str) -> Result<ScanReport> {
+        self.scan_verified(id, false)
+    }
+    pub fn scan_verified(&mut self, id: &str, verify: bool) -> Result<ScanReport> {
+        let lock_path = self.dir(id)?;
+        std::fs::create_dir_all(&lock_path)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path.join("writer.lock"))?;
+        lock.try_lock()
+            .context("別プロセスが索引を更新しています")?;
+        let root = self.root(id)?;
+        if !root.is_dir() {
+            bail!("原本ルートにアクセスできません");
+        }
+        let mut db = self.db(id)?;
+        let index = self.search_index(id)?;
+        let dirty: bool = db.query_row("SELECT value FROM state WHERE key='dirty'", [], |r| {
+            r.get(0)
+        })?;
+        let mut report = ScanReport {
+            recovered: dirty,
+            ..Default::default()
+        };
+        if dirty {
+            let mut s = db.prepare("SELECT path,title,body FROM docs")?;
+            let all = s
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            index.update(true, &[], &all)?;
+            db.execute("UPDATE state SET value=0 WHERE key='dirty'", [])?;
+        }
+        let mut old = HashMap::new();
+        {
+            let mut s = db.prepare("SELECT path,size,mtime,hash FROM docs")?;
+            for row in s.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (
+                        r.get::<_, i64>(1)? as u64,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ),
+                ))
+            })? {
+                let (p, v) = row?;
+                old.insert(p, v);
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut candidates = vec![];
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file()
+                || !entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            {
+                continue;
+            }
+            let full = entry.path().to_path_buf();
+            let path = full
+                .strip_prefix(&root)?
+                .to_str()
+                .context("Unicodeパスが必要です")?
+                .replace('\\', "/");
+            let m = entry.metadata()?;
+            let mtime = m
+                .modified()?
+                .duration_since(UNIX_EPOCH)?
+                .as_nanos()
+                .to_string();
+            seen.insert(path.clone());
+            if !verify
+                && old
+                    .get(&path)
+                    .is_some_and(|(size, time, _)| *size == m.len() && time == &mtime)
+            {
+                report.unchanged += 1;
+                continue;
+            }
+            let previous = old.get(&path).map(|v| v.2.clone());
+            candidates.push(Candidate {
+                path,
+                full,
+                size: m.len(),
+                mtime,
+                previous,
+            });
+        }
+        let changes: Vec<Change> = candidates
+            .into_par_iter()
+            .map(|c| -> Result<_> {
+                if c.size > 16 * 1024 * 1024 {
+                    bail!("16MiBを超えるMDは未対応: {}", c.path);
+                }
+                let raw = std::fs::read_to_string(&c.full)
+                    .with_context(|| format!("読み取り失敗: {}", c.path))?;
+                let hash = blake3::hash(raw.as_bytes()).to_hex().to_string();
+                let parsed = if c.previous.as_ref() == Some(&hash) {
+                    None
+                } else {
+                    Some(parser::parse(&raw, &c.path))
+                };
+                Ok(Change {
+                    path: c.path,
+                    size: c.size,
+                    mtime: c.mtime,
+                    hash,
+                    raw,
+                    parsed,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let deleted: Vec<String> = old.keys().filter(|p| !seen.contains(*p)).cloned().collect();
+        report.deleted = deleted.len();
+        report.changed = changes.iter().filter(|c| c.parsed.is_some()).count();
+        report.unchanged += changes.len() - report.changed;
+        if changes.is_empty() && deleted.is_empty() {
+            return Ok(report);
+        }
+        let tx = db.transaction()?;
+        tx.execute("UPDATE state SET value=1 WHERE key='dirty'", [])?;
+        for path in &deleted {
+            tx.execute("DELETE FROM docs WHERE path=?1", [path])?;
+            tx.execute("DELETE FROM links WHERE source=?1", [path])?;
+        }
+        let mut documents = vec![];
+        for c in &changes {
+            if let Some(p) = &c.parsed {
+                tx.execute(
+                    "INSERT OR REPLACE INTO docs VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        c.path,
+                        c.size as i64,
+                        c.mtime,
+                        c.hash,
+                        p.title,
+                        p.text,
+                        c.raw
+                    ],
+                )?;
+                tx.execute("DELETE FROM links WHERE source=?1", [&c.path])?;
+                for target in &p.links {
+                    tx.execute(
+                        "INSERT INTO links VALUES(?1,?2,NULL,'missing')",
+                        params![c.path, target],
+                    )?;
+                }
+                documents.push((c.path.clone(), p.title.clone(), p.text.clone()));
+            } else {
+                tx.execute(
+                    "UPDATE docs SET size=?2,mtime=?3 WHERE path=?1",
+                    params![c.path, c.size as i64, c.mtime],
+                )?;
+            }
+        }
+        resolve(&tx)?;
+        tx.commit()?;
+        index.update(false, &deleted, &documents)?;
+        db.execute("UPDATE state SET value=0 WHERE key='dirty'", [])?;
+        Ok(report)
+    }
+    pub fn search(&self, id: &str, q: &str) -> Result<Vec<SearchHit>> {
+        if q.len() > 1024 {
+            bail!("検索語が長すぎます");
+        }
+        let db = self.db(id)?;
+        if q.trim().is_empty() {
+            let mut s = db.prepare("SELECT path,title FROM docs ORDER BY path LIMIT 50")?;
+            return Ok(s
+                .query_map([], |r| {
+                    Ok(SearchHit {
+                        path: r.get(0)?,
+                        title: r.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?);
+        }
+        self.search_index(id)?
+            .query(q)?
+            .into_iter()
+            .map(|p| {
+                Ok(
+                    db.query_row("SELECT path,title FROM docs WHERE path=?1", [p], |r| {
+                        Ok(SearchHit {
+                            path: r.get(0)?,
+                            title: r.get(1)?,
+                        })
+                    })?,
+                )
+            })
+            .collect()
+    }
+    pub fn document(&self, id: &str, path: &str) -> Result<Document> {
+        if Path::new(path)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            bail!("不正な文書パス");
+        }
+        Ok(self.db(id)?.query_row(
+            "SELECT path,title,raw FROM docs WHERE path=?1",
+            [path],
+            |r| {
+                Ok(Document {
+                    path: r.get(0)?,
+                    title: r.get(1)?,
+                    markdown: r.get(2)?,
+                })
+            },
+        )?)
+    }
+    pub fn backlinks(&self, id: &str, path: &str) -> Result<Vec<String>> {
+        let db = self.db(id)?;
+        let mut s = db.prepare(
+            "SELECT DISTINCT source FROM links WHERE resolved=?1 ORDER BY source LIMIT 500",
+        )?;
+        Ok(s.query_map([path], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn links(&self, id: &str) -> Result<Vec<Link>> {
+        let db = self.db(id)?;
+        let mut s = db.prepare(
+            "SELECT source,target,resolved,status FROM links ORDER BY source,target LIMIT 5000",
+        )?;
+        Ok(s.query_map([], |r| {
+            Ok(Link {
+                source: r.get(0)?,
+                target: r.get(1)?,
+                resolved: r.get(2)?,
+                status: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn watch(&mut self, id: &str) -> Result<()> {
+        use notify::Watcher;
+        let (send, recv) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = send.send(event);
+        })?;
+        watcher.watch(&self.root(id)?, notify::RecursiveMode::Recursive)?;
+        self.scan(id)?;
+        loop {
+            match recv.recv_timeout(Duration::from_secs(60)) {
+                Ok(Ok(_)) => {
+                    std::thread::sleep(Duration::from_millis(250));
+                    while recv.try_recv().is_ok() {}
+                }
+                Ok(Err(e)) => eprintln!("監視エラー: {e}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(e) => return Err(e.into()),
+            }
+            match self.scan(id) {
+                Ok(r) => println!("{}", serde_json::to_string(&r)?),
+                Err(e) => eprintln!("差分更新失敗（次回再試行）: {e:#}"),
+            }
+        }
+    }
+}
+
+fn normalize(path: &str) -> Option<String> {
+    let mut parts = vec![];
+    for p in path.split('/') {
+        match p {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            p => parts.push(p),
+        }
+    }
+    Some(parts.join("/"))
+}
+fn resolve(db: &Connection) -> Result<()> {
+    let paths: HashSet<String> = {
+        let mut s = db.prepare("SELECT path FROM docs")?;
+        s.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let mut stems: HashMap<String, Vec<String>> = HashMap::new();
+    for p in &paths {
+        if let Some(stem) = Path::new(p).file_stem().and_then(|s| s.to_str()) {
+            stems.entry(stem.to_string()).or_default().push(p.clone());
+        }
+    }
+    let links: Vec<(i64, String, String)> = {
+        let mut s = db.prepare("SELECT rowid,source,target FROM links")?;
+        s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (row, source, target) in links {
+        let target = percent_encoding::percent_decode_str(target.split('#').next().unwrap_or(""))
+            .decode_utf8_lossy()
+            .replace('\\', "/");
+        let mut target = target.trim().to_string();
+        if !target.to_lowercase().ends_with(".md") {
+            target.push_str(".md");
+        }
+        let parent = source.rsplit_once('/').map(|v| v.0).unwrap_or("");
+        let relative = normalize(&format!("{parent}/{target}"));
+        let absolute = normalize(&target);
+        let exact = relative
+            .filter(|p| paths.contains(p))
+            .or_else(|| absolute.filter(|p| paths.contains(p)));
+        let candidates = if target.contains('/') {
+            None
+        } else {
+            Path::new(&target)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| stems.get(s))
+        };
+        let resolved = exact.or_else(|| candidates.filter(|v| v.len() == 1).map(|v| v[0].clone()));
+        let status = if resolved.is_some() {
+            "resolved"
+        } else if candidates.is_some_and(|v| v.len() > 1) {
+            "ambiguous"
+        } else {
+            "missing"
+        };
+        db.execute(
+            "UPDATE links SET resolved=?2,status=?3 WHERE rowid=?1",
+            params![row, resolved, status],
+        )?;
+    }
+    Ok(())
+}

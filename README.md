@@ -13,6 +13,8 @@ Rust + Tantivyによる、複数プロジェクトのMarkdown検索・WikiLink�
 
 詳細は [設計・開発計画](docs/PLAN.ja.md)、実測結果と制約は [検証記録](docs/VERIFICATION.ja.md)。
 
+初期実装済み: プロジェクト登録、差分更新、監視、全文検索、WikiLink/Backlinks、CLI、閲覧API、React UI。未実装: Tauri配布、Sigmaグラフ、認証認可付きチーム公開。[残作業](TODOS.md)を参照してください。
+
 ## Windowsで開始
 
 Rust stable（MSVC、Visual Studio C++ Build Tools）とNode.js 22以上を用意します。SQLiteはbundledビルドのため別途導入不要です。
@@ -36,6 +38,8 @@ npm.cmd run dev
 ```
 
 表示されるローカルURLを開きます。APIは127.0.0.1:3847、Viteは127.0.0.1:5173。プロジェクト追加・スキャンは管理者CLIのみです。HTTPは閲覧専用、外部公開前にはIIS側の認証・認可とTLSを実装してください。現段階のAPIにはユーザー認証がありません。
+
+サンプルを試す場合は、リポジトリルートで`cargo run -p hub-app -- add demo "サンプル仕様" samples/specs`、続けて`cargo run -p hub-app -- scan demo`を実行できます。`serve`も同じデータディレクトリで起動してください。
 
 ```powershell
 cargo fmt --all -- --check

@@ -1,0 +1,208 @@
+use anyhow::Result;
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::StatusCode,
+    routing::get,
+};
+use clap::{Parser, Subcommand};
+use hub_core::Hub;
+use serde::Deserialize;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(about = "読み取り専用Markdown索引基盤")]
+struct Args {
+    #[arg(long, default_value = ".hub")]
+    data: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+#[derive(Subcommand)]
+enum Command {
+    Add {
+        id: String,
+        name: String,
+        root: PathBuf,
+    },
+    Projects,
+    Scan {
+        project: String,
+        #[arg(long)]
+        verify: bool,
+    },
+    Search {
+        project: String,
+        query: String,
+    },
+    Backlinks {
+        project: String,
+        path: String,
+    },
+    Watch {
+        project: String,
+    },
+    Serve,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let mut hub = Hub::open(&args.data)?;
+    let value = match args.command {
+        Command::Add { id, name, root } => {
+            hub.register(&id, &name, &root)?;
+            serde_json::json!({"registered":id})
+        }
+        Command::Projects => serde_json::to_value(hub.projects()?)?,
+        Command::Scan { project, verify } => {
+            serde_json::to_value(hub.scan_verified(&project, verify)?)?
+        }
+        Command::Search { project, query } => serde_json::to_value(hub.search(&project, &query)?)?,
+        Command::Backlinks { project, path } => {
+            serde_json::to_value(hub.backlinks(&project, &path)?)?
+        }
+        Command::Watch { project } => {
+            hub.watch(&project)?;
+            return Ok(());
+        }
+        Command::Serve => {
+            drop(hub);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:3847").await?;
+            println!("閲覧API: http://127.0.0.1:3847 （loopback限定）");
+            axum::serve(listener, router(args.data)).await?;
+            return Ok(());
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn router(data: PathBuf) -> Router {
+    Router::new()
+        .route("/api/projects", get(projects))
+        .route("/api/search", get(search))
+        .route("/api/document", get(document))
+        .route("/api/backlinks", get(backlinks))
+        .route("/api/links", get(links))
+        .with_state(data)
+}
+#[derive(Deserialize)]
+struct Parameters {
+    project: String,
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    path: String,
+}
+type ApiResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
+async fn run(
+    data: PathBuf,
+    operation: impl FnOnce(Hub) -> Result<serde_json::Value> + Send + 'static,
+) -> ApiResult {
+    match tokio::task::spawn_blocking(move || operation(Hub::open(&data)?)).await {
+        Ok(Ok(value)) => Ok(Json(value)),
+        Ok(Err(error)) => {
+            eprintln!("API: {error:#}");
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error":"指定されたプロジェクト・文書・検索条件を確認してください"}),
+                ),
+            ))
+        }
+        Err(error) => {
+            eprintln!("worker: {error}");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":"処理を完了できませんでした"})),
+            ))
+        }
+    }
+}
+async fn projects(State(data): State<PathBuf>) -> ApiResult {
+    run(data, |h| Ok(serde_json::to_value(h.projects()?)?)).await
+}
+async fn search(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.search(&p.project, &p.q)?)?)
+    })
+    .await
+}
+async fn document(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.document(&p.project, &p.path)?)?)
+    })
+    .await
+}
+async fn backlinks(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.backlinks(&p.project, &p.path)?)?)
+    })
+    .await
+}
+async fn links(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.links(&p.project)?)?)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    #[tokio::test]
+    async fn read_api_and_invalid_path() {
+        let source = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "# API\n注文 [[b]]").unwrap();
+        std::fs::write(source.path().join("b.md"), "# 顧客").unwrap();
+        let mut hub = Hub::open(data.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        let app = router(data.path().to_path_buf());
+        for uri in [
+            "/api/projects",
+            "/api/search?project=demo&q=API",
+            "/api/document?project=demo&path=a.md",
+            "/api/backlinks?project=demo&path=b.md",
+            "/api/links?project=demo",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            assert!(serde_json::from_slice::<serde_json::Value>(&body).is_ok());
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/document?project=demo&path=../secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+}

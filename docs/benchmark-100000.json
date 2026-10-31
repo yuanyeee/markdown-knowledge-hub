@@ -1,0 +1,13 @@
+{
+  "backlinks_p95_ms": 3.3688,
+  "files": 100000,
+  "index_bytes": 123810731,
+  "initial_ms": 10827.7728,
+  "profile": "release",
+  "queries": 100,
+  "reader": "opened per request, OS cache warm",
+  "search_p95_ms": 48.8976,
+  "single_delta_ms": 1209.6001999999999,
+  "source_bytes": 44877780,
+  "unchanged_scan_ms": 444.7353
+}
