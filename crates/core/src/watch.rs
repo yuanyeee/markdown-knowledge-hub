@@ -136,6 +136,10 @@ pub(crate) fn run_controlled(
         if !batch.full && batch.paths.is_empty() {
             continue;
         }
+        anyhow::ensure!(
+            hub.root(id)? == root,
+            "入力フォルダーが変更されました。監視を再開してください"
+        );
         let full = batch.full;
         let result = if full {
             hub.scan(id)

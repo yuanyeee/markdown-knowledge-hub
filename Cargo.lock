@@ -695,12 +695,13 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hub-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "hub-core",
+ "hub-service",
  "rfd",
  "serde",
  "serde_json",
@@ -712,10 +713,11 @@ dependencies = [
 
 [[package]]
 name = "hub-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "fs4",
  "notify",
  "percent-encoding",
  "pulldown-cmark",
@@ -727,12 +729,13 @@ dependencies = [
  "serde_yaml_ng",
  "tantivy",
  "tempfile",
+ "uuid",
  "walkdir",
 ]
 
 [[package]]
 name = "hub-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hub-core",

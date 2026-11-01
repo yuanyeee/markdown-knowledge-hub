@@ -1,4 +1,4 @@
-use crate::{Hub, search::Search};
+use crate::Hub;
 use anyhow::{Context, Result, bail};
 use std::{fs, path::Path};
 
@@ -13,13 +13,23 @@ impl Hub {
             .context("保存先が不正です")?
             .canonicalize()?;
         let destination = parent.join(destination.file_name().context("保存先が不正です")?);
-        if destination.starts_with(&self.data) || self.data.starts_with(&destination) {
+        if crate::outputs::overlaps(&destination, &self.data) {
             bail!("バックアップ先を稼働データと分離してください");
         }
         for project in self.projects()? {
             let root = Path::new(&project.root);
-            if destination.starts_with(root) || root.starts_with(&destination) {
+            if crate::outputs::overlaps(&destination, root) {
                 bail!("バックアップ先を原本フォルダと分離してください");
+            }
+        }
+        for project in self.projects()? {
+            if crate::outputs::overlaps(&destination, Path::new(&project.output)) {
+                bail!("バックアップ先を出力フォルダーと分離してください");
+            }
+        }
+        for retired in self.retired_outputs()? {
+            if crate::outputs::overlaps(&destination, Path::new(&retired.path)) {
+                bail!("バックアップ先を旧出力フォルダーと分離してください");
             }
         }
         let initial = self.projects()?;
@@ -31,6 +41,17 @@ impl Hub {
         self.registry
             .backup("main", destination.join("registry.sqlite"), None)?;
         let snapshot = Hub::open(&destination)?;
+        // Backups are self-contained; never retain pointers to live external outputs.
+        snapshot.registry.execute_batch(
+            "DELETE FROM project_outputs; DELETE FROM retired_outputs; DELETE FROM preferences;",
+        )?;
+        // The shared manifest may have been updated by another settings profile.
+        for project in self.projects()? {
+            snapshot.registry.execute(
+                "UPDATE projects SET root=?2 WHERE id=?1",
+                rusqlite::params![project.id, project.root],
+            )?;
+        }
         let projects = snapshot.projects()?;
         let _locks = projects
             .iter()
@@ -40,26 +61,7 @@ impl Hub {
         for project in projects {
             let base = snapshot.dir(&project.id)?;
             fs::create_dir_all(&base)?;
-            let metadata = self.db(&project.id)?;
-            let source = self.index_dir_in_snapshot(&project.id, &metadata)?;
-            let relative = source.strip_prefix(&self.data)?;
-            let expected = destination.join(relative);
-            metadata.backup("main", base.join("metadata.sqlite"), None)?;
-            let search = source.join("search");
-            fs::create_dir_all(expected.join("search"))?;
-            for entry in fs::read_dir(search)? {
-                let entry = entry?;
-                if entry.file_type()?.is_symlink() {
-                    bail!("索引のシンボリックリンクは未対応です");
-                }
-                if entry.file_type()?.is_file() {
-                    fs::copy(
-                        entry.path(),
-                        expected.join("search").join(entry.file_name()),
-                    )?;
-                }
-            }
-            Search::open(&expected.join("search"))?;
+            self.copy_snapshot(&project.id, &base)?;
         }
         Ok(())
     }

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 hub-core = { path = "../core" }
+hub-service = { path = "../service" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

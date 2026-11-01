@@ -116,6 +116,9 @@ impl Search {
             results: Mutex::new(VecDeque::new()),
         })
     }
+    pub(crate) fn document_count(&self) -> Result<u64> {
+        Ok(self.index.reader()?.searcher().num_docs())
+    }
     pub fn update(
         &self,
         reset: bool,

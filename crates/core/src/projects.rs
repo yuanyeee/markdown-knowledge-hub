@@ -2,7 +2,10 @@ use crate::{Hub, SearchHit};
 use anyhow::{Context, Result, bail};
 use rusqlite::params;
 use serde::Serialize;
-use std::{collections::HashSet, fs::File};
+use std::{collections::HashSet, fs::File, path::Path};
+pub(crate) struct ProjectLock {
+    _files: Vec<File>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct ProjectStats {
@@ -27,7 +30,67 @@ pub struct ProjectGraph {
 }
 
 impl Hub {
-    pub(crate) fn project_lock(&self, id: &str, shared: bool) -> Result<File> {
+    pub(crate) fn project_lock(&self, id: &str, shared: bool) -> Result<ProjectLock> {
+        let mut files = vec![self.central_lock(id, shared)?];
+        if let Some((path, token)) = self.managed_output(id)?
+            && path.exists()
+        {
+            self.validate_owned(id, &path, &token)?;
+            files.push(Self::lock_output(&path, id, shared, false)?);
+        }
+        Ok(ProjectLock { _files: files })
+    }
+    pub(crate) fn writer_lock(&self, id: &str) -> Result<ProjectLock> {
+        Self::validate_id(id)?;
+        let parent = self.data.join("writers");
+        std::fs::create_dir_all(&parent)?;
+        if parent.canonicalize()? != parent {
+            bail!("書込ロック保存先が不正です");
+        }
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join(format!("{id}.lock")))?;
+        file.try_lock()?;
+        let mut files = vec![file];
+        if let Some((path, token)) = self.managed_output(id)?
+            && path.exists()
+        {
+            self.validate_owned(id, &path, &token)?;
+            files.push(Self::lock_output(&path, id, false, true)?);
+        }
+        Ok(ProjectLock { _files: files })
+    }
+    pub(crate) fn lock_output(path: &Path, id: &str, shared: bool, writer: bool) -> Result<File> {
+        Self::validate_id(id)?;
+        let parent = path.parent().context("出力先が不正です")?.join(".locks");
+        std::fs::create_dir_all(&parent)?;
+        if parent.canonicalize()? != parent {
+            bail!("出力ロックの別名は使用できません");
+        }
+        let file_path = parent.join(format!(
+            "{id}.{}.lock",
+            if writer { "writer" } else { "lifecycle" }
+        ));
+        if file_path.exists() && file_path.canonicalize()? != file_path {
+            bail!("出力ロックが不正です");
+        }
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(file_path)?;
+        if shared {
+            file.try_lock_shared().context("出力を更新中です")?;
+        } else {
+            file.try_lock().context("出力を別の処理で使用中です")?;
+        }
+        Ok(file)
+    }
+    pub(crate) fn central_lock(&self, id: &str, shared: bool) -> Result<File> {
         Self::validate_id(id)?;
         let dir = self.data.join("locks");
         std::fs::create_dir_all(&dir)?;
@@ -50,25 +113,22 @@ impl Hub {
         Ok(file)
     }
     pub fn remove(&mut self, id: &str) -> Result<()> {
+        let _writer = self.writer_lock(id)?;
         let _lock = self.project_lock(id, false)?;
         self.remove_unlocked(id)
     }
     pub(crate) fn remove_unlocked(&mut self, id: &str) -> Result<()> {
-        let dir = self.dir(id)?;
-        crate::search::Search::evict(&dir);
+        let managed = self.managed_output(id)?;
+        let dir = if let Some((path, _)) = &managed {
+            path.clone()
+        } else {
+            self.dir(id)?
+        };
         if dir.exists() {
-            let expected_parent = self.data.join("indexes").canonicalize()?;
-            let resolved = dir.canonicalize()?;
-            if resolved.parent() != Some(expected_parent.as_path())
-                || resolved.file_name() != Some(std::ffi::OsStr::new(id))
-                || std::fs::symlink_metadata(&dir)?.file_type().is_symlink()
-            {
-                bail!("生成索引の保存先が不正なため削除を中断しました");
-            }
-            // The resolved target is exactly indexes/<validated-id>, never the MD root.
-            std::fs::remove_dir_all(&resolved)
-                .context("索引の削除に失敗しました。watchを停止して再試行してください")?;
+            self.delete_output(id, &dir, managed.as_ref().map(|(_, token)| token.as_str()))?;
         }
+        self.registry
+            .execute("DELETE FROM project_outputs WHERE project=?1", [id])?;
         self.registry
             .execute("DELETE FROM projects WHERE id=?1", [id])?;
         Ok(())

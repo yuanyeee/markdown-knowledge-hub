@@ -6,7 +6,7 @@ Tauri 2で既存ReactをWindowsアプリとして配布する。DesktopはHTTP�
 
 `crates/service`は検索・閲覧・リンク・グラフ・作成／再作成／削除の明示的な操作だけを受け付ける。`web/src/transport.ts`がWeb HTTPとDesktop IPCを切り替える。`web/src-tauri`は専用のCargo workspaceとして分離し、Windows CIで検証する。LinuxのCore/API CIにGUI依存を追加しない。
 
-Desktopは標準でOSのLocalAppData配下のアプリデータフォルダに永続索引を保存する。検証・既存Web索引の再利用には`--data-dir <絶対パス>`で保存先を指定できる。Webの既定`.hub`とDesktopの既定保存先は別。初回は新規プロジェクトから登録する。
+0.3.0では、新規プロジェクトの本文コピー・索引を画面で選択した出力親フォルダーの`MarkdownKnowledgeHub/<project-id>`に保存する。LocalAppDataには登録先などの設定を保存する。従来索引は互換経路で読み込み、移行するまで保存場所を維持する。検証・既存Web索引の再利用には`--data-dir <絶対パス>`で保存先を指定できる。Webの既定`.hub`とDesktopの既定保存先は別。初回は新規プロジェクトから登録する。
 
 ## 実装と受入条件
 
@@ -22,3 +22,7 @@ Desktopは標準でOSのLocalAppData配下のアプリデータフォルダに�
 監視の開始／停止、ページ取得、別名・見出し、フォルダー集約図、原子的更新、実文書評価を追加。現在の結果は[0.2.0検証記録](RELEASE-0.2.0.ja.md)を参照。ネットワーク公開と外部更新配信はユーザー指示により対象外。配布は署名証明書未準備のため未署名。
 
 一次資料: https://v2.tauri.app/develop/calling-rust/ 、 https://v2.tauri.app/reference/config/ 、 https://v2.tauri.app/distribute/windows-installer/
+
+## 0.3.0
+
+入力・出力選択、保存先プレビュー、入力再指定、コピー検証後の出力先切替、旧出力の確認付き整理、既存出力の再登録を追加。移行・入力変更の前に対象監視を停止し、処理後に元の監視状態を復元する。設定保存先の絶対パスは通常画面に常時表示しない。[保存先機能の検証](RELEASE-0.3.0.ja.md)を参照。

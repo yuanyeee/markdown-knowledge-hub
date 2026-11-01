@@ -67,7 +67,16 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
         )?,
         "admin/create" => {
             let id = text(args, "id")?;
-            hub.register(id, text(args, "name")?, Path::new(text(args, "root")?))?;
+            if let Some(output) = args.get("output").and_then(Value::as_str) {
+                hub.register_with_output(
+                    id,
+                    text(args, "name")?,
+                    Path::new(text(args, "root")?),
+                    Path::new(output),
+                )?;
+            } else {
+                hub.register(id, text(args, "name")?, Path::new(text(args, "root")?))?;
+            }
             match hub.scan(id) {
                 Ok(report) => json!({"id":id,"report":report}),
                 Err(error) => {
@@ -77,6 +86,20 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
                     return Err(error);
                 }
             }
+        }
+        "output-settings" => json!({"last_output": hub.last_output_parent()?}),
+        "retired-outputs" => serde_json::to_value(hub.retired_outputs()?)?,
+        "admin/move-output" => serde_json::to_value(
+            hub.move_output(text(args, "project")?, Path::new(text(args, "output")?))?,
+        )?,
+        "admin/open-output" => json!({"id": hub.import_output(Path::new(text(args, "output")?))?}),
+        "admin/change-input" => {
+            hub.change_input(text(args, "project")?, Path::new(text(args, "root")?))?;
+            json!({"id": text(args, "project")?})
+        }
+        "admin/cleanup-output" => {
+            hub.cleanup_retired(text(args, "key")?)?;
+            json!({"removed": text(args, "key")?})
         }
         "admin/rebuild" => serde_json::to_value(hub.rebuild(text(args, "project")?)?)?,
         "admin/remove" => {
@@ -92,6 +115,78 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn external_output_lifecycle_keeps_cached_documents_without_source() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "# Cached document").unwrap();
+        let mut hub = Hub::open(state.path()).unwrap();
+        call(
+            &mut hub,
+            "admin/create",
+            &json!({"id":"demo","name":"Demo","root":source.path(),"output":first.path()}),
+        )
+        .unwrap();
+        assert!(call(&mut hub, "output-settings", &json!({})).unwrap()["last_output"].is_string());
+        let report = call(
+            &mut hub,
+            "admin/move-output",
+            &json!({"project":"demo","output":second.path()}),
+        )
+        .unwrap();
+        let output = report["new_output"].as_str().unwrap();
+        assert!(Path::new(output).exists());
+        let retired = call(&mut hub, "retired-outputs", &json!({})).unwrap();
+        assert_eq!(retired.as_array().unwrap().len(), 1);
+        call(
+            &mut hub,
+            "admin/cleanup-output",
+            &json!({"key":retired[0]["key"]}),
+        )
+        .unwrap();
+        assert!(hub.retired_outputs().unwrap().is_empty());
+        drop(source);
+        let imported_state = tempfile::tempdir().unwrap();
+        let mut imported = Hub::open(imported_state.path()).unwrap();
+        assert_eq!(
+            call(
+                &mut imported,
+                "admin/open-output",
+                &json!({"output":output})
+            )
+            .unwrap()["id"],
+            "demo"
+        );
+        assert_eq!(
+            call(
+                &mut imported,
+                "document",
+                &json!({"project":"demo","path":"a.md"})
+            )
+            .unwrap()["title"],
+            "Cached document"
+        );
+        let replacement = tempfile::tempdir().unwrap();
+        std::fs::write(replacement.path().join("a.md"), "# Replacement").unwrap();
+        call(
+            &mut imported,
+            "admin/change-input",
+            &json!({"project":"demo","root":replacement.path()}),
+        )
+        .unwrap();
+        call(&mut imported, "admin/rebuild", &json!({"project":"demo"})).unwrap();
+        assert_eq!(
+            call(
+                &mut imported,
+                "document",
+                &json!({"project":"demo","path":"a.md"})
+            )
+            .unwrap()["title"],
+            "Replacement"
+        );
+    }
     #[test]
     fn desktop_operations_share_core_and_preserve_sources() {
         let source = tempfile::tempdir().unwrap();

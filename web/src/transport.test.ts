@@ -20,3 +20,10 @@ test('Desktop uses Core IPC without starting or contacting an HTTP server',async
   expect(invoke).toHaveBeenLastCalledWith('hub_request',{operation:'admin/rebuild',args:{project:'demo'}});
   expect(fetcher).not.toHaveBeenCalled();
 });
+test('local output settings reads require the explicit management header',async()=>{
+  const fetcher=vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true,json:async()=>({last_output:null})} as Response);
+  await read('output-settings');
+  expect(fetcher).toHaveBeenLastCalledWith('/api/output-settings?project=',{headers:{'X-Hub-Admin':'1'}});
+  await read('retired-outputs');
+  expect(fetcher).toHaveBeenLastCalledWith('/api/retired-outputs?project=',{headers:{'X-Hub-Admin':'1'}});
+});

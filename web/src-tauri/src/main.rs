@@ -46,11 +46,12 @@ async fn hub_request(
     let watches = state.watches.clone();
     tauri::async_runtime::spawn_blocking(move||{
         if operation=="admin/pick-folder" {
-            return Ok(serde_json::json!({"path":rfd::FileDialog::new().set_title("Markdownフォルダを選択してください").pick_folder().map(|p|p.to_string_lossy().into_owned())}));
+            let purpose=args.get("purpose").and_then(|v|v.as_str()).unwrap_or("フォルダー");
+            return Ok(serde_json::json!({"path":rfd::FileDialog::new().set_title(format!("{purpose}を選択してください")).pick_folder().map(|p|p.to_string_lossy().into_owned())}));
         }
         let path=data.as_ref();
         if operation=="capabilities" {
-            return Ok(serde_json::json!({"admin":true,"folder_picker":true,"desktop":true,"data_dir":path.to_string_lossy()}));
+            return Ok(serde_json::json!({"admin":true,"folder_picker":true,"desktop":true}));
         }
         if operation=="watch/status" || operation=="admin/watch-start" || operation=="admin/watch-stop" || operation=="admin/remove" {
             let id=args.get("project").and_then(|v|v.as_str()).ok_or("プロジェクトを指定してください")?;
@@ -65,6 +66,27 @@ async fn hub_request(
             }
         }
         let mut hub=hub_core::Hub::open(path).map_err(|e|e.to_string())?;
+        if operation=="admin/move-output" || operation=="admin/change-input" {
+            let id=args.get("project").and_then(|v|v.as_str()).ok_or("プロジェクトを指定してください")?;
+            // Keep the watcher control mutex until the switch and restart finish, so
+            // a concurrent start cannot reopen the old location mid-migration.
+            let mut handles=watches.lock().map_err(|_|"監視操作を再試行してください")?;
+            let restart=handles.get(id).is_some_and(|h|h.status().running);
+            handles.remove(id);
+            let result=hub_service::call(&mut hub,&operation,&args).map_err(|e|e.to_string());
+            if restart {
+                let handle=hub_core::WatchHandle::start(path,id).map_err(|e|format!("監視を再開できません。監視を開始し直してください: {e}"));
+                match handle {
+                    Ok(handle)=>{handles.insert(id.to_string(),handle);},
+                    Err(error)=>{
+                        // The output operation may already have committed. Preserve
+                        // that result and make a restart failure visible to the UI.
+                        return match result {Ok(mut value)=>{value["warning"]=serde_json::json!(error);Ok(value)},Err(original)=>Err(format!("{original} / {error}"))};
+                    }
+                }
+            }
+            return result;
+        }
         hub_service::call(&mut hub,&operation,&args).map_err(|e|e.to_string())
     }).await.map_err(|e|e.to_string())?
 }

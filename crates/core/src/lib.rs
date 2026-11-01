@@ -1,6 +1,8 @@
 mod backup;
 mod generations;
 mod monitor;
+mod outputs;
+pub use outputs::{MigrationReport, RetiredOutput};
 mod pages;
 mod parser;
 mod tokenizer;

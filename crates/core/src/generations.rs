@@ -49,6 +49,7 @@ impl Hub {
         db: &Connection,
         before_publish: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        db.execute("INSERT INTO state_text(key,value) VALUES('source_root',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[self.root(id)?.to_str().ok_or_else(||anyhow::anyhow!("入力パスが不正です"))?])?;
         let (_, stage) = self
             .working
             .as_ref()
@@ -83,18 +84,24 @@ impl Hub {
     ) -> Result<ScanReport> {
         Self::validate_id(id)?;
         // Readers share this lifecycle lock. Removal remains exclusive.
-        let writer_dir = self.data.join("writers");
-        fs::create_dir_all(&writer_dir)?;
-        if writer_dir.canonicalize()? != writer_dir {
-            bail!("書込ロック保存先が不正です");
+        let _writer = self.writer_lock(id)?;
+        let recorded_root: Option<String> = self
+            .db(id)?
+            .query_row(
+                "SELECT value FROM state_text WHERE key='source_root'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let root = self.root(id)?;
+        let root_changed = recorded_root.as_deref() != root.to_str();
+        if root_changed && let Some(paths) = paths {
+            for path in paths {
+                crate::store::event_file(&root, path)?;
+            }
         }
-        let writer = fs::File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(writer_dir.join(format!("{id}.lock")))?;
-        writer.try_lock()?;
+        let verify = verify || root_changed;
+        let paths = if root_changed { None } else { paths };
         {
             let _read = self.project_lock(id, true)?;
             if paths.is_none()
@@ -113,7 +120,7 @@ impl Hub {
             crate::search::Search::evict(&self.dir(id)?);
             let active = self.active_dir(id)?;
             let parent = self.dir(id)?.join("generations");
-            if parent.exists() {
+            if parent.exists() && crate::outputs::validate_tree(&self.dir(id)?).is_ok() {
                 if parent.canonicalize()? != parent {
                     bail!("世代保存先が不正です");
                 }

@@ -4,3 +4,10 @@
 .confirm-remove{border:1px solid #cad7d0;border-radius:14px;padding:28px;max-width:520px;color:#243b50}.confirm-remove::backdrop{background:#102b3c66}.confirm-remove h2{font-size:20px}.confirm-remove button{margin-right:12px}
 
 main table{border-collapse:collapse;width:100%;font-size:13px;margin:18px 0;display:block;overflow-x:auto}main th,main td{border:1px solid #dce5e2;padding:8px 10px;text-align:left;vertical-align:top}main th{background:#eef5f1}main tr:nth-child(even){background:#fafcfb}main [aria-label="リンク図"]>button{border:1px solid #cad8d1;background:#f1f7f3;color:#245f4c;border-radius:6px;padding:8px 14px;margin-bottom:16px}
+.project-settings { margin-top:12px; border-top:1px solid var(--line,#ddd); padding-top:12px; }
+.project-settings summary { cursor:pointer; font-weight:600; }
+.project-settings dl { font-size:13px; }
+.project-settings dt { font-weight:600; margin-top:10px; }
+.project-settings dd { margin:4px 0 0; overflow-wrap:anywhere; }
+.retired-output { display:flex; gap:16px; align-items:center; justify-content:space-between; margin-top:12px; font-size:13px; }
+.retired-output span,.confirm-remove p { overflow-wrap:anywhere; }

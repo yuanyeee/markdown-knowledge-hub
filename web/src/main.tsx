@@ -6,10 +6,10 @@ import { remarkWiki, sameTarget,rehypeHeadingIds,headingId,displayMarkdown } fro
 import './style.css';
 import { read as api } from './transport';
 import { WatchManager } from './WatchManager';
-import { ProjectManager } from './ProjectManager';
+import { ProjectManager, type Project } from './ProjectManager';
 const GraphView=lazy(()=>import('./GraphView').then(module=>({default:module.GraphView})));
 
-type Project = { id: string; name: string; root:string };
+
 type Hit = { path: string; title: string };
 type Doc = Hit & { markdown: string };
 type Link = { source: string; target: string; resolved: string | null; status: string };
@@ -31,7 +31,7 @@ function App() {
   const [readBusy, setBusy] = useState(false);
   const [adminBusy,setAdminBusy]=useState(false);
   const busy=readBusy||adminBusy;
-  const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean;data_dir?:string}>({admin:false,folder_picker:false});
+  const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean}>({admin:false,folder_picker:false});
   const [stats,setStats]=useState<{documents:number;links:number;missing:number;missing_heading:number;ambiguous:number;isolated:number;duplicate_names:number}|null>(null);
   const [anchor,setAnchor]=useState('');
   useEffect(()=>{if(anchor&&doc){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
@@ -130,7 +130,7 @@ function App() {
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{displayMarkdown(doc.markdown)}</Markdown></> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
       <aside><h2>Backlinks</h2><p className="hint">この文書への参照</p>{backlinks.map(p => <button className="hit" key={p} onClick={() => void open(p)}>{p}</button>)}{nextBack!==null&&<button disabled={busy} onClick={()=>void more('backlinks')}>参照元をさらに読み込む</button>}{!backlinks.length && <p>参照元はありません。</p>}<h2>出リンク</h2>{outgoing.map((l, i) => <div className="link" key={i}>{l.resolved ? <button className="inline" onClick={() => void open(l.resolved!,l.target.split('#').slice(1).join('#'))}>{l.target}</button> : <span>{l.target}<small> {l.status === 'ambiguous' ? '同名候補あり' : l.status==='missing-heading'?'見出しなし':'リンク先なし'}</small></span>}</div>)}{nextLinkOffset !== null && <button disabled={busy} onClick={() => void moreLinks()}>出リンクをさらに読み込む</button>}<p className="hint">出リンクは文書ごとに100件ずつ取得します。リンク図タブで文書間の関係を確認できます。</p></aside>
-    </div><footer>原本を変更せず、索引から閲覧しています。変更後は「再作成」または監視プロセスで反映できます。{capabilities.desktop&&<div>データ保存先: {capabilities.data_dir}</div>}</footer>
+    </div><footer>入力Markdownは読み取り専用です。変更後は「再作成」または監視で反映できます。生成データの保存先は「プロジェクトの保存先・設定」で確認・変更できます。</footer>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

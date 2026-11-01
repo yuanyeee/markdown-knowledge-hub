@@ -14,6 +14,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub root: String,
+    pub output: String,
+    pub legacy_output: bool,
 }
 #[derive(Debug, Serialize, Default)]
 pub struct ScanReport {
@@ -73,6 +75,7 @@ impl Hub {
         let registry = Connection::open(data.join("registry.sqlite"))?;
         registry.busy_timeout(Duration::from_secs(10))?;
         registry.execute_batch("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL);")?;
+        crate::outputs::initialize_registry(&registry)?;
         Ok(Self {
             data,
             registry,
@@ -81,6 +84,7 @@ impl Hub {
     }
     pub fn register(&mut self, id: &str, name: &str, root: &Path) -> Result<()> {
         Self::validate_id(id)?;
+        let _writer = self.writer_lock(id)?;
         let _lock = self.project_lock(id, false)?;
         if name.trim().is_empty() || name.len() > 300 {
             bail!("プロジェクト名は1～300バイトで指定してください");
@@ -89,6 +93,7 @@ impl Hub {
         if !root.is_dir() || root.starts_with(&self.data) || self.data.starts_with(&root) {
             bail!("原本ルートと索引ディレクトリは独立させてください");
         }
+        self.validate_input(&root)?;
         self.registry.execute(
             "INSERT INTO projects VALUES(?1,?2,?3)",
             params![
@@ -124,20 +129,42 @@ impl Hub {
         Ok(())
     }
     pub fn projects(&self) -> Result<Vec<Project>> {
-        let mut s = self
-            .registry
-            .prepare("SELECT id,name,root FROM projects ORDER BY name")?;
-        Ok(s.query_map([], |r| {
-            Ok(Project {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                root: r.get(2)?,
+        let mut statement=self.registry.prepare("SELECT p.id,p.name,p.root,o.path FROM projects p LEFT JOIN project_outputs o ON p.id=o.project ORDER BY p.name")?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, name, root, output)| {
+                let legacy_output = output.is_none();
+                let root = self.manifest_input(&id)?.unwrap_or(root);
+                Ok(Project {
+                    output: output.unwrap_or_else(|| {
+                        self.data
+                            .join("indexes")
+                            .join(&id)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    id,
+                    name,
+                    root,
+                    legacy_output,
+                })
             })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+            .collect()
     }
     pub fn root(&self, id: &str) -> Result<PathBuf> {
         Self::validate_id(id)?;
+        if let Some(input) = self.manifest_input(id)? {
+            return Ok(PathBuf::from(input));
+        }
         Ok(PathBuf::from(self.registry.query_row(
             "SELECT root FROM projects WHERE id=?1",
             [id],
@@ -146,6 +173,10 @@ impl Hub {
     }
     pub(crate) fn dir(&self, id: &str) -> Result<PathBuf> {
         self.root(id)?;
+        if let Some((path, token)) = self.managed_output(id)? {
+            self.validate_owned(id, &path, &token)?;
+            return Ok(path);
+        }
         let parent = self.data.join("indexes");
         let dir = parent.join(id);
         if (parent.exists() && parent.canonicalize()? != parent)

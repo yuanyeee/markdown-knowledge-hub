@@ -25,8 +25,25 @@ enum Command {
         id: String,
         name: String,
         root: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     Projects,
+    MoveOutput {
+        project: String,
+        output: PathBuf,
+    },
+    OpenOutput {
+        output: PathBuf,
+    },
+    ChangeInput {
+        project: String,
+        root: PathBuf,
+    },
+    RetiredOutputs,
+    CleanupOutput {
+        key: String,
+    },
     Scan {
         project: String,
         #[arg(long)]
@@ -73,9 +90,31 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let mut hub = Hub::open(&args.data)?;
     let value = match args.command {
-        Command::Add { id, name, root } => {
-            hub.register(&id, &name, &root)?;
+        Command::Add {
+            id,
+            name,
+            root,
+            output,
+        } => {
+            if let Some(output) = output {
+                hub.register_with_output(&id, &name, &root, &output)?;
+            } else {
+                hub.register(&id, &name, &root)?;
+            }
             serde_json::json!({"registered":id})
+        }
+        Command::MoveOutput { project, output } => {
+            serde_json::to_value(hub.move_output(&project, &output)?)?
+        }
+        Command::OpenOutput { output } => serde_json::json!({"id": hub.import_output(&output)?}),
+        Command::ChangeInput { project, root } => {
+            hub.change_input(&project, &root)?;
+            serde_json::json!({"id": project})
+        }
+        Command::RetiredOutputs => serde_json::to_value(hub.retired_outputs()?)?,
+        Command::CleanupOutput { key } => {
+            hub.cleanup_retired(&key)?;
+            serde_json::json!({"removed": key})
         }
         Command::Projects => serde_json::to_value(hub.projects()?)?,
         Command::Scan { project, verify } => {

@@ -1,11 +1,10 @@
-use crate::{ApiResult, run};
+use crate::ApiResult;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    routing::{get, post},
 };
-use serde::Deserialize;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -15,16 +14,6 @@ use std::{
 struct AdminState {
     data: PathBuf,
     serial: Arc<Mutex<()>>,
-}
-#[derive(Deserialize)]
-struct Create {
-    id: String,
-    name: String,
-    root: String,
-}
-#[derive(Deserialize)]
-struct Target {
-    project: String,
 }
 fn denied() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -52,71 +41,88 @@ fn authorize(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Va
     }
     Ok(())
 }
+// These read-only endpoints use a custom header to prevent cross-origin simple
+// requests. Same-origin browser GET requests need not include an Origin header.
+fn authorize_read(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if headers.get("x-hub-admin").and_then(|v| v.to_str().ok()) != Some("1") {
+        return Err(denied());
+    }
+    if headers.contains_key("origin") {
+        authorize(headers)?;
+    }
+    Ok(())
+}
 pub fn router(data: PathBuf) -> Router {
     Router::new()
-        .route("/api/admin/create", post(create))
-        .route("/api/admin/remove", post(remove))
-        .route("/api/admin/rebuild", post(rebuild))
+        .route("/api/admin/{operation}", post(manage))
+        .route("/api/output-settings", get(output_settings))
+        .route("/api/retired-outputs", get(retired_outputs))
         .route("/api/admin/pick-folder", post(pick_folder))
         .with_state(AdminState {
             data,
             serial: Arc::new(Mutex::new(())),
         })
 }
-async fn create(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-    Json(p): Json<Create>,
-) -> ApiResult {
-    authorize(&headers)?;
-    run(state.data, move |mut h| {
+async fn service(state: AdminState, operation: String, args: serde_json::Value) -> ApiResult {
+    let result = tokio::task::spawn_blocking(move || {
         let _guard = state
             .serial
             .lock()
-            .map_err(|_| anyhow::anyhow!("管理操作を再試行してください"))?;
-        h.register(&p.id, &p.name, &PathBuf::from(p.root))?;
-        match h.scan(&p.id) {
-            Ok(report) => Ok(serde_json::json!({"id":p.id,"report":report})),
-            Err(e) => {
-                if let Err(cleanup) = h.remove(&p.id) {
-                    eprintln!("作成取消に失敗: {cleanup:#}");
-                }
-                Err(e)
-            }
+            .map_err(|_| anyhow::anyhow!("management lock unavailable"))?;
+        let mut hub = crate::Hub::open(&state.data)?;
+        hub_service::call(&mut hub, &operation, &args)
+    })
+    .await;
+    match result {
+        Ok(Ok(value)) => Ok(Json(value)),
+        Ok(Err(error)) => {
+            eprintln!("management API: {error:#}");
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"フォルダーとプロジェクト設定を確認してください"})),
+            ))
         }
-    })
-    .await
+        Err(error) => {
+            eprintln!("management worker: {error}");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":"処理を完了できませんでした"})),
+            ))
+        }
+    }
 }
-async fn remove(
+async fn manage(
     State(state): State<AdminState>,
+    Path(operation): Path<String>,
     headers: HeaderMap,
-    Json(p): Json<Target>,
+    Json(args): Json<serde_json::Value>,
 ) -> ApiResult {
     authorize(&headers)?;
-    run(state.data, move |mut h| {
-        let _guard = state
-            .serial
-            .lock()
-            .map_err(|_| anyhow::anyhow!("管理操作を再試行してください"))?;
-        h.remove(&p.project)?;
-        Ok(serde_json::json!({"removed":p.project}))
-    })
-    .await
+    if ![
+        "create",
+        "remove",
+        "rebuild",
+        "move-output",
+        "open-output",
+        "change-input",
+        "cleanup-output",
+    ]
+    .contains(&operation.as_str())
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"Unknown operation"})),
+        ));
+    }
+    service(state, format!("admin/{operation}"), args).await
 }
-async fn rebuild(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-    Json(p): Json<Target>,
-) -> ApiResult {
-    authorize(&headers)?;
-    run(state.data, move |mut h| {
-        let _guard = state
-            .serial
-            .lock()
-            .map_err(|_| anyhow::anyhow!("管理操作を再試行してください"))?;
-        Ok(serde_json::to_value(h.rebuild(&p.project)?)?)
-    })
-    .await
+async fn output_settings(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult {
+    authorize_read(&headers)?;
+    service(state, "output-settings".into(), serde_json::json!({})).await
+}
+async fn retired_outputs(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult {
+    authorize_read(&headers)?;
+    service(state, "retired-outputs".into(), serde_json::json!({})).await
 }
 async fn pick_folder(headers: HeaderMap) -> ApiResult {
     authorize(&headers)?;
@@ -151,6 +157,85 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn output_routes_require_management_authorization() {
+        let data = tempfile::tempdir().unwrap();
+        let app = router(data.path().to_path_buf());
+        for uri in ["/api/output-settings", "/api/retired-outputs"] {
+            for authorized in [false, true] {
+                let mut request = Request::get(uri).header("origin", "http://127.0.0.1:5173");
+                if authorized {
+                    request = request.header("x-hub-admin", "1");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if authorized {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::FORBIDDEN
+                    }
+                );
+            }
+            for (admin_header, origin, expected) in [
+                (true, None, StatusCode::OK),
+                (false, None, StatusCode::FORBIDDEN),
+                (true, Some("https://evil.example"), StatusCode::FORBIDDEN),
+            ] {
+                let mut request = Request::get(uri);
+                if admin_header {
+                    request = request.header("x-hub-admin", "1");
+                }
+                if let Some(origin) = origin {
+                    request = request.header("origin", origin);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+            }
+            let response = crate::app_router(data.path().to_path_buf(), false)
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        for op in [
+            "move-output",
+            "open-output",
+            "change-input",
+            "cleanup-output",
+        ] {
+            for origin in ["https://evil.example", "http://127.0.0.1:5173"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(format!("/api/admin/{op}"))
+                            .header("origin", origin)
+                            .header("x-hub-admin", "1")
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if origin.starts_with("https") {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    }
+                );
+            }
+        }
+    }
     #[tokio::test]
     async fn failed_creation_rolls_back_derived_data() {
         let source = tempfile::tempdir().unwrap();
