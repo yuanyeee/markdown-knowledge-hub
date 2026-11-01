@@ -1469,7 +1469,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hub-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "hub-service"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "hub-core",
@@ -2079,7 +2079,7 @@ checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 
 [[package]]
 name = "markdown-knowledge-hub"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "hub-core",
  "hub-service",
