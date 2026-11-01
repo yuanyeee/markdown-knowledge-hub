@@ -285,37 +285,9 @@ impl Hub {
         let mut files = vec![];
         if let Some(paths) = paths {
             for path in paths {
-                // Check every ancestor as well as the file: a directory symlink
-                // must not turn an event into access outside the registered root.
-                let mut full = root.clone();
-                let mut missing = false;
-                for component in Path::new(path).components() {
-                    full.push(component);
-                    match std::fs::symlink_metadata(&full) {
-                        Ok(m) if m.file_type().is_symlink() => {
-                            bail!("シンボリックリンクは索引対象にできません: {path}")
-                        }
-                        Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            missing = true;
-                            break;
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
+                if let Some(file) = event_file(&root, path)? {
+                    files.push(file);
                 }
-                if missing {
-                    continue;
-                }
-                let m = std::fs::metadata(&full)?;
-                if !m.is_file() {
-                    bail!("ファイル以外の変更は全体scanを使用してください: {path}");
-                }
-                // Windows opens case variants of the same file. Keep the SQLite
-                // path identity exact rather than inserting a second document.
-                if full.canonicalize()? != full {
-                    bail!("実ファイルと同じ表記の相対パスを指定してください: {path}");
-                }
-                files.push((full, m));
             }
         } else {
             for entry in walkdir::WalkDir::new(&root).follow_links(false) {
@@ -649,6 +621,30 @@ impl Hub {
     pub fn watch(&mut self, id: &str) -> Result<()> {
         crate::watch::run(self, id)
     }
+}
+
+/// Apply the same filesystem guard before either targeted updates or migration fallback.
+pub(crate) fn event_file(root: &Path, path: &str) -> Result<Option<(PathBuf, std::fs::Metadata)>> {
+    let mut full = root.to_path_buf();
+    for component in Path::new(path).components() {
+        full.push(component);
+        match std::fs::symlink_metadata(&full) {
+            Ok(m) if m.file_type().is_symlink() => {
+                bail!("シンボリックリンクは索引対象にできません: {path}")
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let metadata = std::fs::metadata(&full)?;
+    if !metadata.is_file() {
+        bail!("ファイル以外の変更は全体scanを使用してください: {path}");
+    }
+    if full.canonicalize()? != full {
+        bail!("実ファイルと同じ表記の相対パスを指定してください: {path}");
+    }
+    Ok(Some((full, metadata)))
 }
 
 fn normalize(path: &str) -> Option<String> {

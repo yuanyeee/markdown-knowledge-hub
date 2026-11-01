@@ -141,7 +141,17 @@ impl Hub {
             [],
             |r| r.get(0),
         )?;
-        let paths = if version < 5 { None } else { paths };
+        let paths = if version < 5 {
+            if let Some(paths) = paths {
+                let root = self.root(id)?;
+                for path in paths {
+                    crate::store::event_file(&root, path)?;
+                }
+            }
+            None
+        } else {
+            paths
+        };
         let name = format!(
             "g-{}-{}",
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),

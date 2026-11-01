@@ -16,6 +16,15 @@ pub use store::*;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn initial_targeted_update_still_validates_requested_files() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("directory.md")).unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        assert!(hub.scan_paths("demo", &["directory.md".into()]).is_err());
+    }
+    #[test]
     fn targeted_update_upgrades_the_entire_legacy_metadata() {
         let source = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
