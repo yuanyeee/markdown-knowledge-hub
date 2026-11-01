@@ -17,8 +17,8 @@ Desktopは標準でOSのLocalAppData配下のアプリデータフォルダに�
 - [x] Windows release exeとNSISインストーラーをビルド。PowerShell・ブラウザを手動起動せず動作し、再起動後もプロジェクトを再利用できることを実機確認。
 - [x] Windows CIでDesktopをビルドし、配布ファイルをartifactとして保存する。README・残作業・検証記録を更新。反映とCI結果はGitHub履歴／Actionsを参照。
 
-## 今後の残作業
+## 0.2.0
 
-巨大グラフの集約、frontmatter aliases、検索等のページング、安定世代の原子的公開、実文書性能評価、チーム認証／IIS運用は別マイルストーン。未署名の初期Windows配布物を作成し、自動更新・コード署名は後続工程とする。
+監視の開始／停止、ページ取得、別名・見出し、フォルダー集約図、原子的更新、実文書評価を追加。現在の結果は[0.2.0検証記録](RELEASE-0.2.0.ja.md)を参照。ネットワーク公開と外部更新配信はユーザー指示により対象外。配布は署名証明書未準備のため未署名。
 
 一次資料: https://v2.tauri.app/develop/calling-rust/ 、 https://v2.tauri.app/reference/config/ 、 https://v2.tauri.app/distribute/windows-installer/

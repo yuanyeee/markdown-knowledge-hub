@@ -15,7 +15,7 @@ export function ProjectManager({current,enabled,folderPicker,onChanged,onBusy}:{
     try{await action();}catch(e){setError(String(e));setMessage('');}
     finally{setPending(false);onBusy(false);}
   }
-  if(!enabled)return <p className="admin-hint">新規作成・再作成・削除を使う場合は、APIを管理モード <code>serve --admin</code> で起動してください。</p>;
+  if(!enabled)return <p className="admin-hint">閲覧モードです。プロジェクトの追加・更新は管理者が行います。</p>;
   return <section className="manager" aria-label="プロジェクト管理">
     <div className="manager-actions"><button disabled={pending} onClick={()=>{setShow(v=>!v);setError('');}}>新規プロジェクト</button><button disabled={!current||pending} onClick={()=>void perform(async()=>{await command('rebuild',{project:current!.id});await onChanged(current!.id);setMessage('Wiki・検索索引・リンク関係を再作成しました。');},'原本を読み直して再作成しています…')}>再作成</button><button className="danger" disabled={!current||pending} onClick={()=>{if(current)setRemoveTarget(current);}}>プロジェクトを削除</button></div>
     {current&&<p className="hint source-path">原本フォルダ: {current.root.startsWith('\\\\?\\')?current.root.slice(4):current.root}</p>}

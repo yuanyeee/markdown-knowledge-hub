@@ -1,13 +1,244 @@
+mod backup;
+mod generations;
+mod monitor;
+mod pages;
 mod parser;
+mod tokenizer;
+pub use monitor::*;
 mod projects;
 mod search;
 mod store;
 mod watch;
+pub use pages::*;
 pub use projects::*;
 pub use store::*;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn targeted_update_upgrades_the_entire_legacy_metadata() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "[[BKey]]").unwrap();
+        std::fs::write(source.path().join("b.md"), "---\naliases: [BKey]\n---\n# B").unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        {
+            let db = hub.write_db("demo").unwrap();
+            db.execute_batch("UPDATE state SET value=0 WHERE key='parser_version'; DELETE FROM aliases; DELETE FROM headings; DELETE FROM link_keys;").unwrap();
+        }
+        std::fs::write(source.path().join("a.md"), "# A\n[[BKey]]").unwrap();
+        assert_eq!(hub.scan_paths("demo", &["a.md".into()]).unwrap().changed, 2);
+        assert_eq!(
+            hub.link_target("demo", "a.md", "BKey")
+                .unwrap()
+                .unwrap()
+                .resolved
+                .as_deref(),
+            Some("b.md")
+        );
+    }
+    #[test]
+    fn literal_search_does_not_match_scattered_characters() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "# Match\nCustomer 東京注文").unwrap();
+        std::fs::write(
+            source.path().join("b.md"),
+            "# Other\ncusto tomer 東の京 注の文",
+        )
+        .unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        assert_eq!(hub.search("demo", "customer").unwrap().len(), 1);
+        assert_eq!(hub.search("demo", "東京").unwrap().len(), 1);
+        assert_eq!(hub.search("demo", "customer 注文").unwrap().len(), 1);
+        assert_eq!(hub.search("demo", "東").unwrap().len(), 2);
+    }
+    #[test]
+    fn backlink_pages_and_folder_summary_cover_all_documents() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        for folder in ["x", "y"] {
+            std::fs::create_dir(source.path().join(folder)).unwrap();
+        }
+        std::fs::write(source.path().join("x/a.md"), "# Target").unwrap();
+        std::fs::write(source.path().join("y/a.md"), "# Isolated").unwrap();
+        for i in 0..503 {
+            std::fs::write(source.path().join(format!("x/doc-{i}.md")), "[[a]]").unwrap();
+        }
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        assert_eq!(
+            hub.backlinks_page("demo", "x/a.md", 400, 200)
+                .unwrap()
+                .items
+                .len(),
+            103
+        );
+        assert!(
+            hub.backlinks_page("demo", "x/a.md", 400, 200)
+                .unwrap()
+                .next_offset
+                .is_none()
+        );
+        let stats = hub.stats("demo").unwrap();
+        assert_eq!(stats.duplicate_names, 1);
+        assert_eq!(stats.isolated, 1);
+        let summary = hub.graph_summary("demo").unwrap();
+        assert_eq!(summary.nodes.len(), 2);
+        assert_eq!(summary.edges.len(), 1);
+        assert_eq!(
+            hub.link_target("demo", "x/doc-502.md", "a")
+                .unwrap()
+                .unwrap()
+                .resolved
+                .as_deref(),
+            Some("x/a.md")
+        );
+    }
+    #[test]
+    fn generated_empty_html_anchors_are_recognized_without_enabling_html() {
+        let parsed =
+            crate::parser::parse("<a id=\"screen-login\"></a>\n\n# Login", "a.md").unwrap();
+        assert!(parsed.headings.contains(&"screen-login".to_string()));
+        let parsed =
+            crate::parser::parse("<a id=\"unsafe\" onclick=\"doSomething()\"></a>", "a.md")
+                .unwrap();
+        assert!(!parsed.headings.contains(&"unsafe".to_string()));
+    }
+    #[test]
+    fn aliases_and_heading_targets_are_resolved_and_validated() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("a.md"),
+            "---\naliases: [顧客マスター, 'Customer Master']\n---\n# 顧客\n## 詳細情報\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("b.md"),
+            "[[顧客マスター#詳細情報]] [[Customer Master]] [[a#unknown]] [[#local]]\n## local",
+        )
+        .unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        let links = hub.links("demo").unwrap();
+        assert_eq!(links.iter().filter(|l| l.status == "resolved").count(), 3);
+        assert_eq!(
+            links
+                .iter()
+                .find(|l| l.target == "a#unknown")
+                .unwrap()
+                .status,
+            "missing-heading"
+        );
+        std::fs::write(source.path().join("a.md"), "# 顧客\n## 削除後").unwrap();
+        hub.scan("demo").unwrap();
+        assert_eq!(
+            hub.links("demo")
+                .unwrap()
+                .iter()
+                .find(|l| l.target == "Customer Master")
+                .unwrap()
+                .status,
+            "missing"
+        );
+    }
+    #[test]
+    fn publication_survives_process_exit_without_cleanup() {
+        if let Ok(state) = std::env::var("HUB_CRASH_TEST_STATE") {
+            let mut hub = super::Hub::open(std::path::Path::new(&state)).unwrap();
+            let _ = hub.scan_before_publish("demo", || std::process::exit(77));
+            panic!("公開前停止フックが呼ばれていません");
+        }
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "# BeforeCrash").unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        std::fs::write(source.path().join("a.md"), "# AfterCrash").unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::publication_survives_process_exit_without_cleanup",
+                "--nocapture",
+            ])
+            .env("HUB_CRASH_TEST_STATE", state.path())
+            .status()
+            .unwrap();
+        assert_eq!(result.code(), Some(77));
+        assert_eq!(hub.search("demo", "BeforeCrash").unwrap().len(), 1);
+        hub.scan("demo").unwrap();
+        assert_eq!(hub.search("demo", "AfterCrash").unwrap().len(), 1);
+    }
+    #[test]
+    fn publication_keeps_old_generation_until_both_indexes_are_ready() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "# 旧文書").unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        std::fs::write(source.path().join("a.md"), "# 新文書").unwrap();
+        let before_publish = || -> anyhow::Result<()> {
+            let reader = super::Hub::open(state.path())?;
+            assert_eq!(reader.document("demo", "a.md")?.title, "旧文書");
+            assert_eq!(reader.search("demo", "旧文書")?.len(), 1);
+            anyhow::bail!("公開前の異常終了を模擬")
+        };
+        assert!(hub.scan_before_publish("demo", before_publish).is_err());
+        drop(hub);
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        assert_eq!(hub.search("demo", "旧文書").unwrap().len(), 1);
+        hub.scan("demo").unwrap();
+        assert_eq!(hub.document("demo", "a.md").unwrap().title, "新文書");
+        assert!(hub.search("demo", "旧文書").unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_and_backlink_pages_have_no_hard_truncation() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        for i in 0..63 {
+            std::fs::write(
+                source.path().join(format!("{i:03}.md")),
+                "# ページ試験\n[[000]]",
+            )
+            .unwrap();
+        }
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        let first = hub.search_page("demo", "", 0, 50).unwrap();
+        assert_eq!(first.items.len(), 50);
+        let next = hub
+            .search_page("demo", "", first.next_offset.unwrap(), 50)
+            .unwrap();
+        assert_eq!(next.items.len(), 13);
+        assert!(next.next_offset.is_none());
+        assert_eq!(
+            hub.search_page("demo", "ページ試験", 50, 50)
+                .unwrap()
+                .items
+                .len(),
+            13
+        );
+        assert_eq!(
+            hub.backlinks_page("demo", "000.md", 50, 50)
+                .unwrap()
+                .items
+                .len(),
+            13
+        );
+        assert!(hub.search_page("demo", "", usize::MAX, 1).is_err());
+        assert!(hub.backlinks_page("demo", "000.md", 0, 0).is_err());
+    }
     #[test]
     fn project_lifecycle_preserves_sources_and_recreation_is_fresh() {
         let source = tempfile::tempdir().unwrap();
@@ -166,8 +397,7 @@ mod tests {
         hub.scan("demo").unwrap();
         assert_eq!(hub.search("demo", "客户").unwrap().len(), 1);
         assert_eq!(hub.search("demo", "order").unwrap().len(), 1);
-        let db =
-            rusqlite::Connection::open(state.path().join("indexes/demo/metadata.sqlite")).unwrap();
+        let db = hub.write_db("demo").unwrap();
         db.execute("UPDATE state SET value=1 WHERE key='dirty'", [])
             .unwrap();
         assert!(hub.scan("demo").unwrap().recovered);
@@ -243,7 +473,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(source.path().join("b.md"), "root").unwrap();
-        std::fs::write(source.path().join("sub/b.md"), "nested").unwrap();
+        std::fs::write(source.path().join("sub/b.md"), "nested\n## 見出し").unwrap();
         let mut hub = super::Hub::open(state.path()).unwrap();
         assert!(hub.register("../bad", "bad", source.path()).is_err());
         assert!(hub.register("Demo", "bad", source.path()).is_err());

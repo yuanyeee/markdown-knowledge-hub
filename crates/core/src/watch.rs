@@ -83,6 +83,14 @@ fn relative_event_path(root: &Path, path: &Path) -> Option<String> {
     )
 }
 pub(crate) fn run(hub: &mut Hub, id: &str) -> Result<()> {
+    run_controlled(hub, id, &AtomicBool::new(false), &|_| {})
+}
+pub(crate) fn run_controlled(
+    hub: &mut Hub,
+    id: &str,
+    stop: &AtomicBool,
+    status: &dyn Fn(Option<String>),
+) -> Result<()> {
     let root = hub.root(id)?;
     let (send, recv) = mpsc::sync_channel(4096);
     let overflow = Arc::new(AtomicBool::new(false));
@@ -94,13 +102,26 @@ pub(crate) fn run(hub: &mut Hub, id: &str) -> Result<()> {
     })?;
     watcher.watch(&root, notify::RecursiveMode::Recursive)?;
     hub.scan(id)?;
+    status(None);
     let interval = Duration::from_secs(60);
     let mut next_full = Instant::now() + interval;
     loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let mut batch = Batch::default();
-        match recv.recv_timeout(next_full.saturating_duration_since(Instant::now())) {
+        match recv.recv_timeout(
+            next_full
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(250)),
+        ) {
             Ok(event) => batch.add(&root, event),
-            Err(mpsc::RecvTimeoutError::Timeout) => batch.full = true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() < next_full {
+                    continue;
+                }
+                batch.full = true;
+            }
             Err(e) => return Err(e.into()),
         }
         let deadline = (Instant::now() + Duration::from_millis(250)).min(next_full);
@@ -122,8 +143,14 @@ pub(crate) fn run(hub: &mut Hub, id: &str) -> Result<()> {
             hub.scan_paths(id, &batch.paths.into_iter().collect::<Vec<_>>())
         };
         match result {
-            Ok(r) => println!("{}", serde_json::to_string(&r)?),
-            Err(e) => eprintln!("差分更新失敗（定期照合で再試行）: {e:#}"),
+            Ok(r) => {
+                status(None);
+                println!("{}", serde_json::to_string(&r)?);
+            }
+            Err(e) => {
+                status(Some(format!("{e:#}")));
+                eprintln!("差分更新失敗（定期照合で再試行）: {e:#}");
+            }
         }
         if full {
             next_full = Instant::now() + interval;

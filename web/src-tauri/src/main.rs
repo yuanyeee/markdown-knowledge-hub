@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tauri::{Manager, State};
 struct DesktopState {
-    data: Arc<Mutex<PathBuf>>,
+    data: Arc<PathBuf>,
+    watches: Arc<Mutex<HashMap<String, hub_core::WatchHandle>>>,
 }
 fn data_override(args: &[String]) -> Result<Option<PathBuf>, std::io::Error> {
     let Some(index) = args.iter().position(|a| a == "--data-dir") else {
@@ -41,15 +43,28 @@ async fn hub_request(
         return Err("アプリ内の画面から操作してください".into());
     }
     let data = state.data.clone();
+    let watches = state.watches.clone();
     tauri::async_runtime::spawn_blocking(move||{
         if operation=="admin/pick-folder" {
             return Ok(serde_json::json!({"path":rfd::FileDialog::new().set_title("Markdownフォルダを選択してください").pick_folder().map(|p|p.to_string_lossy().into_owned())}));
         }
-        let path=data.lock().map_err(|_|"アプリを再起動してください".to_string())?;
+        let path=data.as_ref();
         if operation=="capabilities" {
             return Ok(serde_json::json!({"admin":true,"folder_picker":true,"desktop":true,"data_dir":path.to_string_lossy()}));
         }
-        let mut hub=hub_core::Hub::open(&path).map_err(|e|e.to_string())?;
+        if operation=="watch/status" || operation=="admin/watch-start" || operation=="admin/watch-stop" || operation=="admin/remove" {
+            let id=args.get("project").and_then(|v|v.as_str()).ok_or("プロジェクトを指定してください")?;
+            let mut handles=watches.lock().map_err(|_|"監視操作を再試行してください")?;
+            if operation=="admin/watch-stop" || operation=="admin/remove" { handles.remove(id); }
+            if operation=="admin/watch-start" && !handles.get(id).is_some_and(|h|h.status().running) {
+                handles.remove(id);
+                handles.insert(id.to_string(),hub_core::WatchHandle::start(path,id).map_err(|e|e.to_string())?);
+            }
+            if operation!="admin/remove" {
+                return Ok(handles.get(id).map(|h|serde_json::to_value(h.status()).unwrap()).unwrap_or(serde_json::json!({"running":false,"error":null,"updates":0})));
+            }
+        }
+        let mut hub=hub_core::Hub::open(path).map_err(|e|e.to_string())?;
         hub_service::call(&mut hub,&operation,&args).map_err(|e|e.to_string())
     }).await.map_err(|e|e.to_string())?
 }
@@ -61,7 +76,8 @@ fn main() {
             let data = data_override(&args)?.unwrap_or(app.path().app_local_data_dir()?);
             hub_core::Hub::open(&data)?;
             app.manage(DesktopState {
-                data: Arc::new(Mutex::new(data)),
+                data: Arc::new(data),
+                watches: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })

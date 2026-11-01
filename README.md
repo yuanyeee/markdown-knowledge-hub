@@ -1,109 +1,76 @@
 # Markdown Knowledge Hub
 
-Rust + Tantivyによる、複数プロジェクトのMarkdown検索・WikiLink・Backlinks基盤。Windows上でDockerを使わず動作させ、チームの閲覧を中心に育てるプロジェクトです。原本Markdownを変更するAPIは提供しません。
+Rust + Tantivyの読み取り専用Markdown Wiki・全文検索・Backlinks・リンク図。Windowsデスクトップ版と、このPC内で動くWeb版を提供します。Dockerは不要です。**ユーザー指定によりネットワークへ公開しません。**
 
-## 決定済み要件
+## Windowsで使う
 
-- 1プロジェクト10,000～100,000ファイル。複数ルートはプロジェクトとして個別登録。
-- Rust CoreをCLI・Rust HTTP APIで共有し、React UIを接続。将来Tauri 2アダプターを追加。
-- Rayon並列解析、pulldown-cmark、notify監視、Tantivy全文検索、SQLiteメタデータ／リンク。
-- 索引は原本と重ならない別フォルダに保存。登録・切替・再起動で索引を再利用。
-- 同名・リンク切れ・孤立文書を診断し、曖昧なリンクを誤接続しない。
-- AI/MCP、システム横断検索、編集機能は将来の独立モジュール。
+`Markdown-Knowledge-Hub.exe`を起動するか、Windows用セットアップexeでインストールします。PowerShell・ブラウザ・サーバーの手動起動は不要です。
 
-詳細は [設計・開発計画](docs/PLAN.ja.md)、実測結果と制約は [検証記録](docs/VERIFICATION.ja.md)。
+1. 「新規プロジェクト」から名前とMarkdownフォルダーを指定します。
+2. 自動でWiki・検索索引・リンク関係を作成します。
+3. Wiki、全文検索、Backlinks、リンク図で閲覧します。文書一覧・検索・参照元・出リンクは追加取得できます。
+4. 「監視を開始」で原本変更を索引に反映します。「表示を更新」で画面を読み直します。アプリ終了で監視も停止します。
+5. 「再作成」で全原本を読み直します。「プロジェクトを削除」で登録と生成索引を削除します。原本は残るため、同じフォルダーを再登録できます。
 
-実装済み: Windowsデスクトップ版（Tauri 2）、Web版、プロジェクト登録・削除・再作成、差分更新、監視CLI、全文検索、WikiLink/Backlinks、自動Wiki表示、Sigma.jsリンク図。未実装: 巨大グラフの集約表示、安定世代の原子的公開、認証認可付きチーム公開。[残作業](TODOS.md)を参照してください。
+原本Markdownは変更しません。索引は原本と独立した場所へ保存します。既定保存先は`%LOCALAPPDATA%\com.yuanyeee.markdownknowledgehub`で、画面下部にも表示します。Web版の既定`.hub`とは別です。既存索引を使う場合は`--data-dir "D:\HubState"`を指定します。
 
-## Windowsデスクトップ版で使う
+0.1.0の索引を引き継いだ場合は、一度「再作成」するか監視を開始してください。別名・見出し・位置情報付き検索索引へ更新します。旧版のwatchと新バージョンを同じ索引に対して併用しないでください。
 
-Windows用セットアップexeを実行してアプリを起動するか、単体の`Markdown-Knowledge-Hub.exe`を起動します。PowerShell・Webブラウザ・HTTP API・Viteの手動起動は不要です。
+## 実装済み
 
-「新規プロジェクト」からMarkdownフォルダを登録するとWikiと検索索引を生成します。検索、Backlinks、リンク図、再作成・削除もアプリ内で操作できます。登録は終了後も保存されます。原本Markdownは変更しません。
+- マルチプロジェクト登録・削除・再作成・再起動後の再利用。
+- Rayonの16文書単位の並列解析、pulldown-cmark、notifyの対象パス更新・定期照合。
+- SQLiteとTantivyの公開先を同時確定する原子的更新。公開直前の子プロセス停止・復旧試験。
+- 日本語・中文・英語の位置情報付き部分文字列検索。空白区切りの語はAND条件。
+- WikiLink、通常Markdownリンク、frontmatter aliases、見出しID・安全な空HTMLアンカー、Backlinks。
+- ReactのMarkdown表表示、文書／検索／参照元／出リンクのページ取得、未取得の本文リンクの個別解決。
+- Sigma.jsの文書近傍図・フォルダー集約図、同名・孤立・未解決の集計。
+- CLIのバックアップ・未使用保存先への復元、本番Webビルドのローカル配信。
+- Windows/Linux Rust CI、React CI、Windows Desktopビルド・配布artifact。
 
-既定のデータ保存先は`%LOCALAPPDATA%\com.yuanyeee.markdownknowledgehub`。Web版の既定`.hub`とは別です。アプリ下部にも保存先を表示します。既存Web登録をそのまま使う場合は、アプリ起動時に`--data-dir "D:\既存の索引フォルダ"`を指定してください。原本Markdownフォルダではなくregistry.sqliteのある保存先を指定します。
+[0.2.0検証結果](docs/RELEASE-0.2.0.ja.md)・[アーキテクチャ](docs/ARCHITECTURE.ja.md)・[運用／バックアップ](docs/OPERATIONS.ja.md)・[制約と対象外](TODOS.md)を参照してください。
 
-開発・配布ビルド（Windows、Rust/Node導入済み環境）:
+## 開発環境
+
+Rust stable（WindowsはMSVCとC++ Build Tools）、Node.js 22以上、WebView2 Runtimeを使用します。SQLiteはbundledビルドです。配布物は証明書未準備のため未署名です。NSISはWebView2未導入時に公式bootstrapperを取得する設定です。
 
 ```powershell
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cd web
 npm.cmd ci
+npm.cmd test
 npm.cmd run desktop:dev
-# 配布用exeとNSISインストーラーを生成:
-npm.cmd run desktop:build
+# 配布用exe・NSISを生成
+npm.cmd run desktop:build -- --ci -- --locked
 ```
 
-出力先は`web/src-tauri/target/release/markdown-knowledge-hub.exe`と`web/src-tauri/target/release/bundle/nsis/*-setup.exe`。GitHub ActionsのDesktop jobにも配布artifactを保存します。現時点の配布物は未署名です。WebView2 Runtimeが必要で、NSISは未導入時にbootstrapperで取得する設定です。インストーラー自体のインストール／アンインストール試験は未実施です。[Desktop設計・制約](docs/DESKTOP.ja.md)も参照してください。
+WindowsでcargoがPATHにない場合は`& "$env:USERPROFILE\.cargo\bin\cargo.exe"`を使用します。再ビルドや`npm ci`の前に、古いアプリ・watch・Viteを停止してください。実行中のexeはWindowsで置き換えられません。
 
-## Windowsで開始
-
-Rust stable（MSVC、Visual Studio C++ Build Tools）とNode.js 22以上を用意します。SQLiteはbundledビルドのため別途導入不要です。
+## ローカルWeb版とCLI
 
 ```powershell
-cargo build --workspace
-cargo run -p hub-app -- --data D:\KnowledgeHub\state add system-a "システムA" D:\Specifications\SystemA
-cargo run -p hub-app -- --data D:\KnowledgeHub\state scan system-a
-# 相対パスを指定して更新（変更・追加・削除済みファイル）
-cargo run -p hub-app -- --data D:\KnowledgeHub\state update system-a docs/order.md
-cargo run -p hub-app -- --data D:\KnowledgeHub\state search system-a 注文
-cargo run -p hub-app -- --data D:\KnowledgeHub\state watch system-a
-# watchとは別端末。索引更新プロセスは同時に1つだけ実行してください。
-cargo run -p hub-app -- --data D:\KnowledgeHub\state serve
+cargo run -p hub-app -- --data D:\HubState add system-a "システムA" D:\Specifications\SystemA
+cargo run -p hub-app -- --data D:\HubState scan system-a
+cargo run -p hub-app -- --data D:\HubState watch system-a
+# 別端末で本番ビルドをローカル配信（Vite不要）
+cargo run -p hub-app -- --data D:\HubState serve --web-dir web/dist --admin
 ```
 
-別端末で:
+先に`web`で`npm.cmd run build`を実行してください。URLは`http://127.0.0.1:3847/`。管理操作が不要なら`--admin`を省略します。APIのbind先は127.0.0.1固定で、外部向けのlisten設定は提供しません。開発用Viteは`web`で`npm.cmd run dev`（127.0.0.1:5173）です。
 
-```powershell
-cd web
-npm.cmd ci
-npm.cmd run dev
-```
+`update PROJECT docs/a.md`は対象ファイルをハッシュ検証して更新します。`rebuild PROJECT`は完全再作成です。通常のscanはサイズとmtimeを使用し、両方不変の変更を確認する場合は`scan PROJECT --verify`を使います。
 
-表示されるローカルURLを開きます。APIは127.0.0.1:3847、Viteは127.0.0.1:5173。通常serveは閲覧専用です。現段階のAPIにはユーザー認証がなく、外部公開にはIIS側の認証・認可とTLSの実装が必要です。
-
-## 画面から新規作成・削除・再作成
-
-バックエンドを停止して、リポジトリ直下で管理モードを起動します。
-
-```powershell
-cargo run -p hub-app -- serve --admin
-# cargoがPATHにないWindows環境:
-& "$env:USERPROFILE\.cargo\bin\cargo.exe" run -p hub-app -- serve --admin
-```
-
-画面で「新規プロジェクト」→名前入力→「フォルダを選択」（Windows）またはパス入力→「作成してWikiを開く」。Markdownを解析してWiki・検索索引・リンク関係を生成し、先頭の文書を表示します。「リンク図」で近傍図、「プロジェクト全体を見る」で先頭200文書以内の図を表示できます。図のノードからWikiへ移動できます。
-
-「再作成」は全Markdownのハッシュを照合し、Tantivyを再構築します。「プロジェクトを削除」は確認後、登録と生成索引だけを削除します。原本は残るため同じフォルダを再登録できます。削除前にそのプロジェクトのCLI watchを停止してください。管理APIはローカルOriginと専用ヘッダーを要求し、管理モード以外では提供しません。
-
-Windowsでは起動中の実行ファイルを置き換えられません。再ビルド・`npm ci`の前に、serve／watch／Viteを各端末の`Ctrl+C`で停止してください。依存関係が変わらない通常起動では`npm ci`は不要です。
-
-サンプルを試す場合は、リポジトリルートで`cargo run -p hub-app -- add demo "サンプル仕様" samples/specs`、続けて`cargo run -p hub-app -- scan demo`を実行できます。`serve`も同じデータディレクトリで起動してください。
-
-監視のファイル変更イベントは対象パスだけを更新します。追加・削除は全体のリンク候補を再評価し、フォルダ操作・監視エラー・再走査要求では全体scanに戻ります。60秒ごとの全体照合も実施します。`update`はファイル名の大小文字も実ファイルと同じ相対パスで指定してください。最大500パスまで対象限定で処理し、それを超える場合は全件ハッシュ検証に切り替わります。
-
-Reactの出リンクは文書別に100件ずつ取得するため、プロジェクト全体のリンク数が5,000件を超えても利用できます。「出リンクをさらに読み込む」で続きを表示します。本文内のリンク移動は取得済みの出リンクに対応します。
-
-```powershell
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cd web
-npm.cmd run build
-```
-
-## リポジトリ構成
+## 構成
 
 ```text
-crates/core/       原本走査・解析・永続プロジェクト・リンク解決・検索
-crates/app/        管理CLI、監視、閲覧HTTP API
-crates/service/    DesktopからCoreを呼ぶ明示的な操作
-web/              React + TypeScript閲覧UI（Web/Tauri共用候補）
-web/src-tauri/     Tauri 2 Windowsホストとインストーラー設定
-scripts/          合成Markdown生成と性能測定
-docs/             日本語計画・検証記録・運用上の制約
-.github/workflows/ Windows/Linuxビルド・テスト
+crates/core/       解析・リンク解決・検索・原子的更新・監視・バックアップ
+crates/service/    Web/Desktop共用の明示的操作
+crates/app/        CLIとloopback HTTP API、本番静的ファイル配信
+web/src/          共通React UI
+web/src-tauri/    Tauri Windowsホスト・監視管理・NSIS
+scripts/          合成文書の性能／メモリ測定
+docs/             設計・計画・検証・運用
 ```
 
-## 取り扱い
-
-索引DBには本文のコピーが含まれます。原本と同じアクセス権で保護してください。機密文書や生成索引をGitに追加しないでください。ライセンスは未設定で、公開・再配布許諾はありません。
+索引には原文のコピーが含まれます。原本と同等のアクセス権で保護し、機密文書や生成索引をGitへ追加しないでください。実文書の性能報告は集計値だけを記録します。ライセンスは未設定で、公開・再配布許諾はありません。

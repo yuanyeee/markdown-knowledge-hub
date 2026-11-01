@@ -9,7 +9,10 @@ pub struct ProjectStats {
     pub documents: usize,
     pub links: usize,
     pub missing: usize,
+    pub missing_heading: usize,
     pub ambiguous: usize,
+    pub isolated: usize,
+    pub duplicate_names: usize,
 }
 #[derive(Debug, Serialize)]
 pub struct GraphEdge {
@@ -52,6 +55,7 @@ impl Hub {
     }
     pub(crate) fn remove_unlocked(&mut self, id: &str) -> Result<()> {
         let dir = self.dir(id)?;
+        crate::search::Search::evict(&dir);
         if dir.exists() {
             let expected_parent = self.data.join("indexes").canonicalize()?;
             let resolved = dir.canonicalize()?;
@@ -72,6 +76,16 @@ impl Hub {
     pub fn stats(&self, id: &str) -> Result<ProjectStats> {
         let _lock = self.project_lock(id, true)?;
         let db = self.db(id)?;
+        let mut names = std::collections::HashMap::<String, usize>::new();
+        let mut statement = db.prepare("SELECT path FROM docs")?;
+        for path in statement.query_map([], |r| r.get::<_, String>(0))? {
+            if let Some(name) = std::path::Path::new(&path?)
+                .file_stem()
+                .and_then(|p| p.to_str())
+            {
+                *names.entry(name.to_string()).or_default() += 1;
+            }
+        }
         Ok(ProjectStats {
             documents: db.query_row("SELECT COUNT(*) FROM docs", [], |r| {
                 Ok(r.get::<_, i64>(0)? as usize)
@@ -84,11 +98,79 @@ impl Hub {
                 [],
                 |r| Ok(r.get::<_, i64>(0)? as usize),
             )?,
+            missing_heading:db.query_row("SELECT COUNT(*) FROM links WHERE status='missing-heading'",[],|r|Ok(r.get::<_,i64>(0)? as usize))?,
             ambiguous: db.query_row(
                 "SELECT COUNT(*) FROM links WHERE status='ambiguous'",
                 [],
                 |r| Ok(r.get::<_, i64>(0)? as usize),
             )?,
+            isolated: db.query_row("SELECT COUNT(*) FROM docs d WHERE NOT EXISTS(SELECT 1 FROM links WHERE source=d.path AND resolved IS NOT NULL AND resolved<>d.path) AND NOT EXISTS(SELECT 1 FROM links WHERE resolved=d.path AND source<>d.path)",[],|r|Ok(r.get::<_,i64>(0)? as usize))?,
+            duplicate_names: names.values().filter(|n|**n>1).count(),
+        })
+    }
+    /// Folder aggregation reads every resolved edge; document rendering caps do not apply.
+    pub fn graph_summary(&self, id: &str) -> Result<ProjectGraph> {
+        let _lock = self.project_lock(id, true)?;
+        let db = self.db(id)?;
+        let mut groups = std::collections::BTreeMap::<String, usize>::new();
+        let folder = |path: &str| {
+            path.rsplit_once('/')
+                .map(|(p, _)| p.split('/').next().unwrap_or("/"))
+                .unwrap_or("/")
+                .to_string()
+        };
+        let mut statement = db.prepare("SELECT path FROM docs")?;
+        for path in statement.query_map([], |r| r.get::<_, String>(0))? {
+            *groups.entry(folder(&path?)).or_default() += 1;
+        }
+        let truncated = groups.len() > 200;
+        let mut nodes = groups
+            .iter()
+            .take(200)
+            .map(|(name, count)| SearchHit {
+                path: name.clone(),
+                title: format!("{name} ({count}文書)"),
+            })
+            .collect::<Vec<_>>();
+        let selected = nodes.iter().map(|n| n.path.clone()).collect::<HashSet<_>>();
+        if truncated {
+            nodes.push(SearchHit {
+                path: "[その他]".into(),
+                title: format!(
+                    "その他 ({}文書)",
+                    groups
+                        .iter()
+                        .filter(|(p, _)| !selected.contains(*p))
+                        .map(|(_, n)| n)
+                        .sum::<usize>()
+                ),
+            });
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        let mut statement =
+            db.prepare("SELECT source,resolved FROM links WHERE resolved IS NOT NULL")?;
+        for row in
+            statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        {
+            let (a, b) = row?;
+            let group = |p: &str| {
+                let f = folder(p);
+                if selected.contains(&f) {
+                    f
+                } else {
+                    "[その他]".to_string()
+                }
+            };
+            keys.insert((group(&a), group(&b)));
+        }
+        let edges = keys
+            .into_iter()
+            .map(|(source, target)| GraphEdge { source, target })
+            .collect();
+        Ok(ProjectGraph {
+            nodes,
+            edges,
+            truncated,
         })
     }
     pub fn graph(&self, id: &str, center: Option<&str>, limit: usize) -> Result<ProjectGraph> {

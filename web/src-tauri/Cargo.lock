@@ -1469,7 +1469,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hub-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1477,16 +1477,18 @@ dependencies = [
  "percent-encoding",
  "pulldown-cmark",
  "rayon",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tantivy",
  "walkdir",
 ]
 
 [[package]]
 name = "hub-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "hub-core",
@@ -2075,7 +2077,7 @@ checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 
 [[package]]
 name = "markdown-knowledge-hub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hub-core",
  "hub-service",
@@ -3074,6 +3076,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3294,6 +3302,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap 2.14.2",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -4366,6 +4387,12 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "url"

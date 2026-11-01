@@ -21,6 +21,23 @@ fn number(args: &Value, key: &str, default: usize) -> Result<usize> {
 pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
     Ok(match operation {
         "projects" => serde_json::to_value(hub.projects()?)?,
+        "link-target" => serde_json::to_value(hub.link_target(
+            text(args, "project")?,
+            text(args, "path")?,
+            text(args, "target")?,
+        )?)?,
+        "search-page" => serde_json::to_value(hub.search_page(
+            text(args, "project")?,
+            args.get("q").and_then(Value::as_str).unwrap_or(""),
+            number(args, "offset", 0)?,
+            number(args, "limit", 50)?,
+        )?)?,
+        "backlinks-page" => serde_json::to_value(hub.backlinks_page(
+            text(args, "project")?,
+            text(args, "path")?,
+            number(args, "offset", 0)?,
+            number(args, "limit", 100)?,
+        )?)?,
         "search" => serde_json::to_value(hub.search(
             text(args, "project")?,
             args.get("q").and_then(Value::as_str).unwrap_or(""),
@@ -38,6 +55,7 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             number(args, "limit", 100)?,
         )?)?,
         "stats" => serde_json::to_value(hub.stats(text(args, "project")?)?)?,
+        "graph-summary" => serde_json::to_value(hub.graph_summary(text(args, "project")?)?)?,
         "graph" => serde_json::to_value(
             hub.graph(
                 text(args, "project")?,

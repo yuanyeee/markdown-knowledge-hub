@@ -1,0 +1,36 @@
+{
+  "backlinks_p95_ms": 3.8493999999999997,
+  "corpus": "synthetic, padded; not production documents",
+  "event_delta_p95_ms": 1627.481,
+  "event_sample_ms": [
+    302.06309999999996,
+    319.2578,
+    1627.481,
+    344.0443,
+    310.3514,
+    314.32959999999997,
+    330.2705,
+    309.8858,
+    318.161,
+    389.0233
+  ],
+  "event_samples": 10,
+  "files": 50000,
+  "first_three_uncached_query_ms": [
+    10.042,
+    4.069500000000001,
+    84.9138
+  ],
+  "index_bytes": 2352952191,
+  "initial_ms": 63892.1029,
+  "profile": "release",
+  "queries": 100,
+  "reader": "reader cache up to 8 generations; result cache up to 32 pages; repeated three queries, cache warm after first pass",
+  "search_p95_ms": 5.3088,
+  "single_delta_ms": 537.8397,
+  "source_bytes": 409600000,
+  "target_document_bytes": 8192,
+  "unchanged_scan_ms": 131.32469999999998,
+  "sampled_peak_working_set_bytes": 532652032,
+  "memory_sampling_interval_ms": 100
+}

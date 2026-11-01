@@ -48,9 +48,23 @@ enum Command {
     Watch {
         project: String,
     },
+    Rebuild {
+        project: String,
+    },
+    Backup {
+        destination: PathBuf,
+    },
+    Restore {
+        backup: PathBuf,
+        destination: PathBuf,
+    },
     Serve {
+        #[arg(long, default_value_t = 3847)]
+        port: u16,
         #[arg(long)]
         admin: bool,
+        #[arg(long)]
+        web_dir: Option<PathBuf>,
     },
 }
 
@@ -78,11 +92,36 @@ async fn main() -> Result<()> {
             hub.watch(&project)?;
             return Ok(());
         }
-        Command::Serve { admin } => {
+        Command::Rebuild { project } => serde_json::to_value(hub.rebuild(&project)?)?,
+        Command::Backup { destination } => {
+            hub.backup(&destination)?;
+            serde_json::json!({"backup":destination})
+        }
+        Command::Restore {
+            backup,
+            destination,
+        } => {
+            Hub::open(&backup)?.backup(&destination)?;
+            serde_json::json!({"restored":destination})
+        }
+        Command::Serve {
+            admin,
+            web_dir,
+            port,
+        } => {
             drop(hub);
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:3847").await?;
-            println!("閲覧API: http://127.0.0.1:3847 （loopback限定）");
-            axum::serve(listener, app_router(args.data, admin)).await?;
+            let mut app = app_router(args.data.clone(), admin);
+            if let Some(path) = web_dir {
+                anyhow::ensure!(
+                    path.join("index.html").is_file(),
+                    "Web本番ビルドのindex.htmlがありません"
+                );
+                app = app.fallback_service(tower_http::services::ServeDir::new(path));
+            }
+            let listener =
+                tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+            println!("閲覧API: http://127.0.0.1:{port} （loopback限定）");
+            axum::serve(listener, app).await?;
             return Ok(());
         }
     };
@@ -94,12 +133,16 @@ fn router(data: PathBuf) -> Router {
     Router::new()
         .route("/api/projects", get(projects))
         .route("/api/search", get(search))
+        .route("/api/search-page", get(search_page))
+        .route("/api/backlinks-page", get(backlinks_page))
         .route("/api/document", get(document))
         .route("/api/backlinks", get(backlinks))
         .route("/api/links", get(links))
+        .route("/api/link-target", get(link_target))
         .route("/api/document-links", get(document_links))
         .route("/api/stats", get(stats))
         .route("/api/graph", get(graph))
+        .route("/api/graph-summary", get(graph_summary))
         .with_state(data)
 }
 fn app_router(data: PathBuf, admin_enabled: bool) -> Router {
@@ -135,6 +178,12 @@ async fn graph(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiR
     })
     .await
 }
+async fn graph_summary(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.graph_summary(&p.project)?)?)
+    })
+    .await
+}
 #[derive(Deserialize)]
 struct Parameters {
     project: String,
@@ -142,11 +191,16 @@ struct Parameters {
     q: String,
     #[serde(default)]
     path: String,
+    #[serde(default)]
+    target: String,
 }
 #[derive(Deserialize)]
 struct LinkParameters {
     project: String,
+    #[serde(default)]
     path: String,
+    #[serde(default)]
+    q: String,
     #[serde(default)]
     offset: usize,
     #[serde(default = "default_link_limit")]
@@ -183,6 +237,7 @@ async fn run(
 async fn projects(State(data): State<PathBuf>) -> ApiResult {
     run(data, |h| Ok(serde_json::to_value(h.projects()?)?)).await
 }
+
 async fn search(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
     run(data, move |h| {
         Ok(serde_json::to_value(h.search(&p.project, &p.q)?)?)
@@ -207,10 +262,34 @@ async fn links(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiR
     })
     .await
 }
+async fn link_target(State(data): State<PathBuf>, Query(p): Query<Parameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(
+            h.link_target(&p.project, &p.path, &p.target)?,
+        )?)
+    })
+    .await
+}
 async fn document_links(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
     run(data, move |h| {
         Ok(serde_json::to_value(
             h.links_page(&p.project, &p.path, p.offset, p.limit)?,
+        )?)
+    })
+    .await
+}
+async fn search_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(
+            h.search_page(&p.project, &p.q, p.offset, p.limit)?,
+        )?)
+    })
+    .await
+}
+async fn backlinks_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(
+            h.backlinks_page(&p.project, &p.path, p.offset, p.limit)?,
         )?)
     })
     .await
@@ -257,6 +336,11 @@ mod tests {
             "/api/document?project=demo&path=a.md",
             "/api/backlinks?project=demo&path=b.md",
             "/api/links?project=demo",
+            "/api/search-page?project=demo&q=API&limit=1",
+            "/api/backlinks-page?project=demo&path=b.md&limit=1",
+            "/api/link-target?project=demo&path=a.md&target=b",
+            "/api/graph-summary?project=demo",
+            "/api/stats?project=demo",
         ] {
             let response = app
                 .clone()
