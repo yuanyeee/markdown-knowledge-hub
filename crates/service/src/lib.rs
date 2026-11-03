@@ -69,7 +69,14 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             let id = text(args, "id")?;
             let original = Path::new(text(args, "root")?);
             let output = args.get("output").and_then(Value::as_str).map(Path::new);
-            let generated = if args.get("oml").and_then(Value::as_bool) == Some(true) {
+            let generated = if let Some(files) = args.get("md_files") {
+                let files: Vec<std::path::PathBuf> = serde_json::from_value(files.clone())?;
+                Some(hub.prepare_markdown_selection(
+                    id,
+                    &files,
+                    output.context("出力の親フォルダーを選択してください")?,
+                )?)
+            } else if args.get("oml").and_then(Value::as_bool) == Some(true) {
                 let parent = output.context("出力の親フォルダーを選択してください")?;
                 Some(hub.prepare_oml_wiki(id, original, parent)?)
             } else {
@@ -119,6 +126,32 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn selected_markdown_keeps_relative_links_and_excludes_unselected_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("source");
+        let output = temp.path().join("output");
+        std::fs::create_dir_all(input.join("sub"))?;
+        std::fs::create_dir(&output)?;
+        let first = input.join("a.md");
+        let second = input.join("sub/b.md");
+        std::fs::write(&first, "# Alpha\n[Beta](sub/b.md)")?;
+        std::fs::write(&second, "# Beta")?;
+        std::fs::write(input.join("excluded.md"), "# Excluded")?;
+        let mut hub = Hub::open(&temp.path().join("settings"))?;
+        call(
+            &mut hub,
+            "admin/create",
+            &json!({
+                "id": "selected", "name": "Selection", "root": "", "output": output,
+                "md_files": [first, second]
+            }),
+        )?;
+        assert_eq!(hub.backlinks("selected", "sub/b.md")?, vec!["a.md"]);
+        assert!(hub.search("selected", "Excluded")?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn oml_creation_registers_the_generated_wiki() -> Result<()> {
         let temp = tempfile::tempdir()?;

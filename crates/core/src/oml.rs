@@ -218,9 +218,14 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
 impl crate::Hub {
     /// Prepare a separate Markdown input for the normal project registration flow.
     pub fn prepare_oml_wiki(&self, id: &str, input: &Path, parent: &Path) -> Result<PathBuf> {
+        let destination = self.generated_input_path(id, parent, "OML-Wiki")?;
+        compile_oml_wiki(input, &destination)?;
+        Ok(destination)
+    }
+    fn generated_input_path(&self, id: &str, parent: &Path, prefix: &str) -> Result<PathBuf> {
         Self::validate_id(id)?;
         let parent = parent.canonicalize()?;
-        let destination = parent.join(format!("OML-Wiki-{id}-{}", uuid::Uuid::new_v4()));
+        let destination = parent.join(format!("{prefix}-{id}-{}", uuid::Uuid::new_v4()));
         self.validate_input(&destination)?;
         for project in self.projects()? {
             ensure!(
@@ -228,7 +233,43 @@ impl crate::Hub {
                 "既存プロジェクトの入力領域には生成できません"
             );
         }
-        compile_oml_wiki(input, &destination)?;
+        Ok(destination)
+    }
+
+    pub fn prepare_markdown_selection(
+        &self,
+        id: &str,
+        files: &[PathBuf],
+        parent: &Path,
+    ) -> Result<PathBuf> {
+        ensure!(!files.is_empty(), "Markdownファイルを選択してください");
+        let mut selected = std::collections::BTreeSet::new();
+        for path in files {
+            let path = path.canonicalize()?;
+            ensure!(
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md")),
+                "有効な.mdファイルを選択してください"
+            );
+            selected.insert(path);
+        }
+        let first = selected
+            .first()
+            .context("Markdownファイルを選択してください")?;
+        let common = first
+            .ancestors()
+            .skip(1)
+            .find(|root| selected.iter().all(|file| file.starts_with(root)))
+            .context("同じドライブにあるMarkdownファイルを選択してください")?;
+        let destination = self.generated_input_path(id, parent, "Markdown-Selection")?;
+        fs::create_dir(&destination)?;
+        for file in &selected {
+            let target = destination.join(file.strip_prefix(common)?);
+            fs::create_dir_all(target.parent().context("保存先が不正です")?)?;
+            fs::copy(file, target)?;
+        }
         Ok(destination)
     }
 }
