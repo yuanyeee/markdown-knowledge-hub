@@ -83,6 +83,13 @@ impl Hub {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct BacklinkDetail {
+    pub path: String,
+    pub title: String,
+    pub call: bool,
+}
+
 impl Hub {
     pub fn backlink_details(
         &self,
@@ -90,19 +97,20 @@ impl Hub {
         path: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<SearchHit>> {
+    ) -> Result<Page<BacklinkDetail>> {
         validate(offset, limit)?;
         let _lock = self.project_lock(id, true)?;
         let db = self.db(id)?;
         let mut statement = db.prepare(
-            "SELECT DISTINCT d.path,d.title FROM links l JOIN docs d ON d.path=l.source
-             WHERE l.resolved=?1 AND l.source<>?1 ORDER BY d.title,d.path LIMIT ?2 OFFSET ?3",
+            "SELECT d.path,d.title,MAX(l.target LIKE '%#oml-call') FROM links l JOIN docs d ON d.path=l.source
+             WHERE l.resolved=?1 AND l.source<>?1 GROUP BY d.path,d.title ORDER BY d.title,d.path LIMIT ?2 OFFSET ?3",
         )?;
         let items = statement
             .query_map(params![path, (limit + 1) as i64, offset as i64], |row| {
-                Ok(SearchHit {
+                Ok(BacklinkDetail {
                     path: row.get(0)?,
                     title: row.get(1)?,
+                    call: row.get(2)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

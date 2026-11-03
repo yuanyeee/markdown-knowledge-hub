@@ -14,3 +14,16 @@ main table{border-collapse:collapse;width:100%;font-size:13px;margin:18px 0;disp
 
 .output-preview{background:#eef5f1;border:1px solid #cad8d1;border-radius:8px;padding:12px 14px;margin:14px 0;font-size:13px}.output-preview output{display:block;margin-top:6px;overflow-wrap:anywhere}.creation-context{font-size:13px;color:#43566b;border-left:3px solid #91b5a9;padding-left:12px}
 nav select[aria-label="元仕様書"] { display:block; width:100%; margin:6px 0 16px; }
+/* Keep each reading pane within the available desktop viewport. */
+html,body,#root { height:100%; }
+.app { height:100dvh; min-height:0; display:flex; flex-direction:column; }
+.app > :not(.workspace) { flex-shrink:0; }
+.workspace { flex:1; min-height:0; grid-template-rows:minmax(0,1fr); }
+.workspace > nav,.workspace > main,.workspace > aside { min-width:0; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.workspace-settings { max-height:36vh; overflow:auto; margin-bottom:8px; }
+.workspace-settings > summary { cursor:pointer; padding:6px 0; }
+.mermaid-diagram { margin:12px 0; }
+.mermaid-scroll { max-height:65vh; overflow:auto; margin-top:8px; }
+.mermaid-scroll img { display:block; height:auto; max-width:none; }
+@media(max-width:800px){ .app { height:auto; } .workspace { display:block; } .workspace > nav,.workspace > aside { max-height:45vh; } }
+@media(min-width:801px){ .workspace { grid-template-columns:minmax(145px,20%) minmax(0,1fr) minmax(150px,23%); } .workspace > aside { grid-column:auto; } }

@@ -1,6 +1,8 @@
+import { MermaidDiagram } from './MermaidDiagram';
+import { remarkFlowTables } from './flowTables';
 import React, { Suspense,lazy,useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import Markdown from 'react-markdown';
+import Markdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkWiki, sameTarget,rehypeHeadingIds,headingId,displayMarkdown } from './wiki';
 import './style.css';
@@ -11,10 +13,18 @@ const GraphView=lazy(()=>import('./GraphView').then(module=>({default:module.Gra
 
 
 type Hit = { path: string; title: string };
+type Backlink = Hit & {call:boolean};
 type Doc = Hit & { markdown: string };
-type Link = { source: string; target: string; resolved: string | null; status: string };
+type Link = { source: string; target: string; resolved: string | null; status: string; resolved_title?:string|null };
 type Page<T> = {items:T[];next_offset:number|null};
 type LinkPage = { items: Link[]; next_offset: number | null };
+const WikiPre: NonNullable<Components['pre']> = ({children,node: _node,...props}) => {
+  const code=React.Children.toArray(children)[0];
+  if(React.isValidElement<{className?:string;children?:React.ReactNode}>(code)&&code.props.className==='language-mermaid'){
+    return <MermaidDiagram source={String(code.props.children??'').trim()}/>;
+  }
+  return <pre {...props}>{children}</pre>;
+};
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState('');
@@ -24,7 +34,7 @@ function App() {
   const [nextBack,setNextBack]=useState<number|null>(null);
   const [searched,setSearched]=useState('');
   const [doc, setDoc] = useState<Doc | null>(null);
-  const [backlinks, setBacklinks] = useState<Hit[]>([]);
+  const [backlinks, setBacklinks] = useState<Backlink[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
   const [nextLinkOffset, setNextLinkOffset] = useState<number | null>(null);
   const [error, setError] = useState('');
@@ -33,8 +43,10 @@ function App() {
   const busy=readBusy||adminBusy;
   const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean}>({admin:false,folder_picker:false});
   const [stats,setStats]=useState<{documents:number;links:number;missing:number;missing_heading:number;ambiguous:number;isolated:number;duplicate_names:number}|null>(null);
+  const centralPane=useRef<HTMLElement>(null);
   const [anchor,setAnchor]=useState('');
   useEffect(()=>{if(anchor&&doc){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
+  useEffect(()=>{if(!anchor)centralPane.current?.scrollTo(0,0);},[doc?.path,anchor]);
   const [view,setView]=useState<'wiki'|'graph'>('wiki');
   const [revision,setRevision]=useState(0);
   const generation = useRef(0);
@@ -48,7 +60,7 @@ function App() {
   useEffect(() => {
     generation.current++;
     let active = true;
-    setDoc(null); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ(''); setError('');setStats(null);setView('wiki');
+    setDoc(null); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ(''); setError('');setStats(null);setView('wiki');
     if (project) {
       setBusy(true);
       Promise.all([api<Page<Hit>>('search-page', project,{limit:'50'}),api<typeof stats>('stats',project)]).then(async ([h,s]) => {
@@ -56,7 +68,7 @@ function App() {
         setHits(h.items);setNextHit(h.next_offset);setSearched('');setStats(s);
         if(h.items[0]) {
           const path=h.items[0].path;
-          const [d,b,page]=await Promise.all([api<Doc>('document',project,{path}),api<Page<Hit>>('backlink-details',project,{path,limit:'100'}),api<LinkPage>('document-links',project,{path})]);
+          const [d,b,page]=await Promise.all([api<Doc>('document',project,{path}),api<Page<Backlink>>('backlink-details',project,{path,limit:'100'}),api<LinkPage>('document-links',project,{path})]);
           if(active){setDoc(d);setBacklinks(b.items);setNextBack(b.next_offset);setLinks(page.items);setNextLinkOffset(page.next_offset);}
         }
       })
@@ -76,7 +88,7 @@ function App() {
     const current = ++generation.current;
     setError(''); setBusy(true);
     try {
-      const [d, b, page] = await Promise.all([api<Doc>('document', project, { path }), api<Page<Hit>>('backlink-details', project, { path,limit:'100' }), api<LinkPage>('document-links', project, { path })]);
+      const [d, b, page] = await Promise.all([api<Doc>('document', project, { path }), api<Page<Backlink>>('backlink-details', project, { path,limit:'100' }), api<LinkPage>('document-links', project, { path })]);
       if (current === generation.current) { setDoc(d); setBacklinks(b.items);setNextBack(b.next_offset); setLinks(page.items); setNextLinkOffset(page.next_offset);setAnchor(fragment);setView('wiki'); }
     } catch (e) { if (current === generation.current) setError(String(e)); }
     finally { if (current === generation.current) setBusy(false); }
@@ -97,7 +109,7 @@ function App() {
     const current=generation.current;setBusy(true);setError('');
     try {
       if(kind==='hits') {const page=await api<Page<Hit>>('search-page',project,{q:searched,offset:String(offset),limit:'50'});if(current===generation.current){setHits(v=>[...v,...page.items]);setNextHit(page.next_offset);}}
-      else if(doc){const page=await api<Page<Hit>>('backlink-details',project,{path:doc.path,offset:String(offset),limit:'100'});if(current===generation.current){setBacklinks(v=>[...v,...page.items]);setNextBack(page.next_offset);}}
+      else if(doc){const page=await api<Page<Backlink>>('backlink-details',project,{path:doc.path,offset:String(offset),limit:'100'});if(current===generation.current){setBacklinks(v=>[...v,...page.items]);setNextBack(page.next_offset);}}
     }catch(e){if(current===generation.current)setError(String(e));}finally{if(current===generation.current)setBusy(false);}
   }
   async function navigate(target:string){
@@ -139,8 +151,8 @@ function App() {
       <label>プロジェクト<select disabled={busy} value={project} onChange={e => setProject(e.target.value)}><option value="" disabled>プロジェクトを選択</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
       <form onSubmit={e => { e.preventDefault(); setSource(''); void search(); }}><label htmlFor="query">全文検索</label><div className="search"><input id="query" value={q} onChange={e => setQ(e.target.value)} placeholder="キーワードを入力（日本語・中文・English）"/><button disabled={!project || busy}>検索</button></div></form>
     </section>
-    <ProjectManager current={projects.find(p=>p.id===project)} enabled={capabilities.admin} folderPicker={capabilities.folder_picker} onChanged={refreshProjects} onBusy={setAdminBusy}/>
-    {capabilities.desktop&&project&&<WatchManager key={project} project={project} onRefresh={()=>setRevision(v=>v+1)}/>}
+    <details className="workspace-settings"><summary>プロジェクト管理・監視</summary><ProjectManager current={projects.find(p=>p.id===project)} enabled={capabilities.admin} folderPicker={capabilities.folder_picker} onChanged={refreshProjects} onBusy={setAdminBusy}/>
+    {capabilities.desktop&&project&&<WatchManager key={project} project={project} onRefresh={()=>setRevision(v=>v+1)}/>}</details>
     {stats&&<div className="project-stats"><span>文書 <strong>{stats.documents.toLocaleString()}</strong></span><span>リンク <strong>{stats.links.toLocaleString()}</strong></span><span>リンク先なし <strong>{stats.missing.toLocaleString()}</strong></span><span>同名候補あり <strong>{stats.ambiguous.toLocaleString()}</strong></span><span>見出しなし <strong>{stats.missing_heading.toLocaleString()}</strong></span><span title="他の文書との解決済みリンクがない文書">孤立文書 <strong>{stats.isolated.toLocaleString()}</strong></span><span>同名文書群 <strong>{stats.duplicate_names.toLocaleString()}</strong></span></div>}
     {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}</div>}
     {error && <p role="alert" className="error">{error}</p>}
@@ -161,7 +173,8 @@ function App() {
         {!source&&nextHit!==null&&<button disabled={busy} onClick={()=>void more('hits')}>文書をさらに読み込む</button>}
         {project&&!visibleHits.length&&<p>該当する文書がありません。</p>}
       </nav>
-      <main>{view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div><Markdown skipHtml remarkPlugins={[remarkGfm,remarkWiki]} rehypePlugins={[rehypeHeadingIds]} components={{
+      <main ref={centralPane}>{view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div><Markdown skipHtml remarkPlugins={[remarkGfm,remarkWiki,remarkFlowTables]} rehypePlugins={[rehypeHeadingIds]} components={{
+        pre: WikiPre,
         a: ({ href, children }) => {
           const link = outgoing.find(l => sameTarget(href, l.target));
           if (link?.resolved) return <button className="inline" onClick={() => void open(link.resolved!,link.target.split('#').slice(1).join('#'))}>{children}</button>;
@@ -171,7 +184,21 @@ function App() {
         },
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{displayMarkdown(doc.markdown)}</Markdown></> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
-      <aside><h2>参照元（Backlinks）</h2><p className="hint">この文書を参照する別ページ</p>{backlinks.map(item => <button className="hit" key={item.path} onClick={() => void open(item.path)}><strong>{item.title}</strong><span>{item.path}</span></button>)}{nextBack!==null&&<button disabled={busy} onClick={()=>void more('backlinks')}>参照元をさらに読み込む</button>}{!backlinks.length && <p>参照元はありません。</p>}<h2>出リンク</h2>{outgoing.map((l, i) => <div className="link" key={i}>{l.resolved ? <button className="inline" onClick={() => void open(l.resolved!,l.target.split('#').slice(1).join('#'))}>{l.target}</button> : <span>{l.target}<small> {l.status === 'ambiguous' ? '同名候補あり' : l.status==='missing-heading'?'見出しなし':'リンク先なし'}</small></span>}</div>)}{nextLinkOffset !== null && <button disabled={busy} onClick={() => void moreLinks()}>出リンクをさらに読み込む</button>}<p className="hint">出リンクは文書ごとに100件ずつ取得します。リンク図タブで文書間の関係を確認できます。</p></aside>
+      <aside>
+        <h2>参照元</h2>
+        {backlinks.map(item=><button className="hit" key={item.path} onClick={()=>void open(item.path)}>
+          <strong>{item.title}</strong><span>{item.call?'呼び出し元':'文書参照'} · {item.path}</span>
+        </button>)}
+        {nextBack!==null&&<button disabled={busy} onClick={()=>void more('backlinks')}>参照元をさらに読み込む</button>}
+        {!backlinks.length&&<p>参照元はありません。</p>}
+        <h2>参照先</h2>
+        {outgoing.filter(link=>link.resolved!==doc?.path).map((link,index)=><div className="link" key={index}>
+          {link.resolved?<button className="hit" onClick={()=>void open(link.resolved!,link.target.split('#').slice(1).join('#'))}>
+            <strong>{link.resolved_title??link.target}</strong><span>{link.target.endsWith('#oml-call')?'呼び出し先':'文書参照'}</span>
+          </button>:<span>{link.target}<small> {link.status==='ambiguous'?'同名候補あり':link.status==='missing-heading'?'見出しなし':'リンク先なし'}</small></span>}
+        </div>)}
+        {nextLinkOffset!==null&&<button disabled={busy} onClick={()=>void moreLinks()}>参照先をさらに読み込む</button>}
+      </aside>
     </div><footer>入力Markdownは読み取り専用です。変更後は「再作成」または監視で反映できます。生成データの保存先は「プロジェクトの保存先・設定」で確認・変更できます。</footer>
   </div>;
 }

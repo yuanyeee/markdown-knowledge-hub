@@ -19,6 +19,7 @@ pub struct ProjectStats {
 }
 #[derive(Debug, Serialize)]
 pub struct GraphEdge {
+    pub call: bool,
     pub source: String,
     pub target: String,
 }
@@ -225,7 +226,11 @@ impl Hub {
         }
         let edges = keys
             .into_iter()
-            .map(|(source, target)| GraphEdge { source, target })
+            .map(|(source, target)| GraphEdge {
+                source,
+                target,
+                call: false,
+            })
             .collect();
         Ok(ProjectGraph {
             nodes,
@@ -277,12 +282,14 @@ impl Hub {
         let mut edges = vec![];
         let mut edge_keys = HashSet::new();
         for path in &paths {
-            let mut s=db.prepare_cached("SELECT DISTINCT resolved FROM links WHERE source=?1 AND resolved IS NOT NULL LIMIT 1001")?;
+            let mut s=db.prepare_cached("SELECT resolved, MAX(target LIKE '%#oml-call') FROM links WHERE source=?1 AND resolved IS NOT NULL AND resolved<>source GROUP BY resolved LIMIT 1001")?;
             let targets = s
-                .query_map([path], |r| r.get::<_, String>(0))?
+                .query_map([path], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             truncated |= targets.len() > 1000;
-            for target in targets {
+            for (target, call) in targets {
                 if selected.contains(&target) && edge_keys.insert((path.clone(), target.clone())) {
                     if edges.len() == 1000 {
                         truncated = true;
@@ -291,6 +298,7 @@ impl Hub {
                     edges.push(GraphEdge {
                         source: path.clone(),
                         target,
+                        call,
                     });
                 }
             }

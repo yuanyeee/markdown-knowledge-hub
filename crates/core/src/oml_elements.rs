@@ -5,6 +5,7 @@ pub struct Element<'a> {
     pub title: String,
     pub line: usize,
     pub body: &'a str,
+    pub anchors: Vec<String>,
 }
 
 pub fn extract(source: &str) -> Vec<Element<'_>> {
@@ -66,6 +67,17 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
                     None
                 }
             });
+        let slug = crate::parser::heading_id(title);
+        let prior = source[..*offset].trim_end();
+        let explicit = prior
+            .lines()
+            .next_back()
+            .and_then(|line| line.trim().strip_prefix("<a id=\""))
+            .and_then(|line| line.strip_suffix("\"></a>"));
+        let mut anchors = vec![slug];
+        if let Some(id) = explicit.filter(|id| *id != anchors[0]) {
+            anchors.push(id.to_owned());
+        }
         let Some((kind, title)) = classified.filter(|(_, title)| !title.is_empty()) else {
             continue;
         };
@@ -78,7 +90,86 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
             title: title.to_owned(),
             line: newlines.partition_point(|position| position < offset) + 1,
             body: &source[*offset..end],
+            anchors,
         });
     }
     elements
+}
+
+/// Only explicit action execution rows in OML flow tables establish a call.
+pub fn calls(markdown: &str) -> std::collections::BTreeSet<String> {
+    use pulldown_cmark::Options;
+    let mut columns = None;
+    let mut cells = Vec::new();
+    let mut cell = None;
+    let mut result = std::collections::BTreeSet::new();
+    for event in Parser::new_ext(markdown, Options::ENABLE_TABLES) {
+        match event {
+            Event::Start(Tag::Table(_)) => columns = None,
+            Event::Start(Tag::TableHead | Tag::TableRow) => cells.clear(),
+            Event::Start(Tag::TableCell) => cell = Some(String::new()),
+            Event::Text(text) | Event::Code(text) => {
+                if let Some(cell) = &mut cell {
+                    cell.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                cells.push(cell.take().unwrap_or_default().trim().to_owned())
+            }
+            Event::End(TagEnd::TableHead) => {
+                columns = cells
+                    .iter()
+                    .position(|v| v == "種別")
+                    .zip(cells.iter().position(|v| v == "処理"))
+                    .filter(|_| cells.iter().any(|v| v == "次へ"));
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some((kind, label)) = columns
+                    && cells.get(kind).is_some_and(|v| v == "アクション実行")
+                    && let Some(value) = cells.get(label).filter(|v| !v.is_empty())
+                {
+                    result.insert(value.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+pub fn route_fragments(
+    markdown: &str,
+    anchors: &std::collections::BTreeMap<String, Vec<usize>>,
+    prefix: &str,
+) -> String {
+    use pulldown_cmark::Options;
+    let mut result = String::new();
+    let mut end = 0;
+    for (event, span) in Parser::new_ext(markdown, Options::ENABLE_TABLES).into_offset_iter() {
+        let Event::Start(Tag::Link { dest_url, .. }) = event else {
+            continue;
+        };
+        let Some(fragment) = dest_url.strip_prefix('#') else {
+            continue;
+        };
+        let Ok(fragment) = percent_encoding::percent_decode_str(fragment).decode_utf8() else {
+            continue;
+        };
+        let Some([number]) = anchors.get(fragment.as_ref()).map(Vec::as_slice) else {
+            continue;
+        };
+        let original = &markdown[span.clone()];
+        let Some(label_end) = original.rfind("](") else {
+            continue;
+        };
+        if span.start < end || !original.starts_with('[') || !original.ends_with(')') {
+            continue;
+        }
+        result.push_str(&markdown[end..span.start]);
+        result.push_str(&original[..label_end + 2]);
+        result.push_str(&format!("{prefix}{number}.md)"));
+        end = span.end;
+    }
+    result.push_str(&markdown[end..]);
+    result
 }

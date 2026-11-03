@@ -199,6 +199,21 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
             }
         }
     }
+    let extracted: Vec<_> = specs
+        .iter()
+        .map(|spec| crate::oml_elements::extract(&spec.source))
+        .collect();
+    let mut actions = BTreeMap::<(usize, &str), Vec<usize>>::new();
+    for (id, elements) in extracted.iter().enumerate() {
+        for (number, element) in elements.iter().enumerate() {
+            if element.kind.contains("アクション") || element.kind == "関数" {
+                actions
+                    .entry((id, &element.title))
+                    .or_default()
+                    .push(number + 1);
+            }
+        }
+    }
     fs::create_dir(&destination)?;
     let mut index = String::from("# OML Wiki\n\n## モジュール一覧\n\n");
     for (id, spec) in specs.iter().enumerate() {
@@ -209,28 +224,77 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
             literal(&spec.path.to_string_lossy()),
             dependencies[id]
         );
-        let elements = crate::oml_elements::extract(&spec.source);
+        let elements = &extracted[id];
+        let mut anchors = BTreeMap::<String, Vec<usize>>::new();
+        for (number, element) in elements.iter().enumerate() {
+            for anchor in &element.anchors {
+                anchors.entry(anchor.clone()).or_default().push(number + 1);
+            }
+        }
         if !elements.is_empty() {
             let module_page = page(id);
             let folder = module_page.trim_end_matches(".md");
             fs::create_dir(destination.join(folder))?;
             body.push_str("\n## 要素別Wiki\n\n");
-            for (number, element) in elements.into_iter().enumerate() {
+            for (number, element) in elements.iter().enumerate() {
                 let title = format!("{} · {}", element.kind, literal(&element.title));
                 let relative = format!("{folder}/{}.md", number + 1);
                 body.push_str(&format!("- [{title}]({relative})\n"));
-                let content = format!(
+                let mut content = format!(
                     "# {title}\n\n[元仕様書ページ](../{module_page}) · {} {} 行\n\n{}",
                     literal(&spec.path.to_string_lossy()),
                     element.line,
-                    element.body
+                    crate::oml_elements::route_fragments(element.body, &anchors, "")
                 );
+                content.push_str("\n<a id=\"oml-call\"></a>\n");
+                if element.kind.contains("アクション") || element.kind == "関数" {
+                    let calls = crate::oml_elements::calls(element.body);
+                    if !calls.is_empty() {
+                        content.push_str("\n## 処理フローの呼び出し先\n\n");
+                    }
+                    for call in calls {
+                        let (module, action) = call.split_once('.').map_or(
+                            (Some(id), call.as_str()),
+                            |(module, action)| {
+                                let matched =
+                                    by_name
+                                        .get(module)
+                                        .and_then(|items| match items.as_slice() {
+                                            [module] => Some(*module),
+                                            _ => None,
+                                        });
+                                (matched, action)
+                            },
+                        );
+                        let target = module.and_then(|module| {
+                            actions.get(&(module, action)).map(|items| (module, items))
+                        });
+                        if let Some((module, numbers)) = target
+                            && let [number] = numbers.as_slice()
+                        {
+                            let target = page(module);
+                            let folder = target.trim_end_matches(".md");
+                            content.push_str(&format!(
+                                "- [{}](../{folder}/{number}.md#oml-call)\n",
+                                literal(&call)
+                            ));
+                        } else {
+                            content.push_str(&format!("- 未解決　{}\n", literal(&call)));
+                        }
+                    }
+                }
                 fs::write(destination.join(relative), content)?;
                 report.elements += 1;
             }
         }
         body.push_str("\n## 元仕様書\n\n");
-        body.push_str(&spec.source);
+        let module_page = page(id);
+        let prefix = format!("{}/", module_page.trim_end_matches(".md"));
+        body.push_str(&crate::oml_elements::route_fragments(
+            &spec.source,
+            &anchors,
+            &prefix,
+        ));
         fs::write(destination.join(page(id)), body)?;
     }
     fs::write(destination.join("index.md"), index)?;
@@ -309,7 +373,7 @@ mod tests {
         fs::create_dir(&source)?;
         fs::write(
             source.join("orders.md"),
-            "# Orders モジュール仕様書\n\n# 画面: EditOrder\n\n## スクリーンアクション\n\n### Save\n\n画面処理\n\n# サーバーアクション: Store\n\nサーバー処理\n\n## エンティティ\n\n### Order\n\n注文データ",
+            "# Orders モジュール仕様書\n\n[保存へ](#store-id)\n\n# 画面: EditOrder\n\n## スクリーンアクション\n\n### Save\n\n画面処理\n\n| # | 種別 | 処理 | 次へ |\n|---|---|---|---|\n| 1 | アクション実行 | Store | → 2 |\n| 2 | 終了 | End | |\n\n<a id=\"store-id\"></a>\n\n# サーバーアクション: Store\n\nサーバー処理\n\n## エンティティ\n\n### Order\n\n注文データ",
         )?;
         assert_eq!(compile_oml_wiki(&source, &wiki)?.elements, 4);
         let mut hub = Hub::open(&temp.path().join("settings"))?;
@@ -326,6 +390,33 @@ mod tests {
         let backlinks = hub.backlink_details("oml", &screen.path, 0, 20)?;
         assert_eq!(backlinks.items[0].title, "Orders");
         assert!(backlinks.items.iter().all(|hit| hit.path != screen.path));
+        let store = pages
+            .iter()
+            .find(|hit| hit.title == "サーバーアクション · Store")
+            .context("store page")?;
+        let save = pages
+            .iter()
+            .find(|hit| hit.title == "画面アクション · Save")
+            .context("save page")?;
+        let callers = hub.backlink_details("oml", &store.path, 0, 20)?;
+        assert!(
+            callers
+                .items
+                .iter()
+                .any(|hit| hit.path == save.path && hit.call)
+        );
+        assert!(
+            hub.graph("oml", Some(&store.path), 20)?
+                .edges
+                .iter()
+                .any(|edge| edge.source == save.path && edge.target == store.path && edge.call)
+        );
+        let module = hub.document("oml", &sources[0].path)?;
+        assert!(
+            module
+                .markdown
+                .contains(&format!("[保存へ]({})", store.path))
+        );
         Ok(())
     }
 

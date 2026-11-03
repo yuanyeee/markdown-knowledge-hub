@@ -41,6 +41,7 @@ pub struct Link {
     pub target: String,
     pub resolved: Option<String>,
     pub status: String,
+    pub resolved_title: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct LinkPage {
@@ -592,6 +593,7 @@ impl Hub {
                 target: r.get(1)?,
                 resolved: r.get(2)?,
                 status: r.get(3)?,
+                resolved_title: None,
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
@@ -609,7 +611,7 @@ impl Hub {
         }
         validate_relative_md(source)?;
         let db = self.db(id)?;
-        let mut s = db.prepare("SELECT source,target,resolved,status FROM links WHERE source=?1 ORDER BY target,rowid LIMIT ?2 OFFSET ?3")?;
+        let mut s = db.prepare("SELECT l.source,l.target,l.resolved,l.status,d.title FROM links l LEFT JOIN docs d ON d.path=l.resolved WHERE l.source=?1 ORDER BY l.target,l.rowid LIMIT ?2 OFFSET ?3")?;
         let mut items = s
             .query_map(params![source, (limit + 1) as i64, offset as i64], |r| {
                 Ok(Link {
@@ -617,6 +619,7 @@ impl Hub {
                     target: r.get(1)?,
                     resolved: r.get(2)?,
                     status: r.get(3)?,
+                    resolved_title: r.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -640,6 +643,7 @@ impl Hub {
                 target: r.get(1)?,
                 resolved: r.get(2)?,
                 status: r.get(3)?,
+                resolved_title: None,
             })
         })? {
             let link = row?;
