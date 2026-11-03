@@ -25,7 +25,7 @@ const WikiPre: NonNullable<Components['pre']> = ({children,node: _node,...props}
   }
   return <pre {...props}>{children}</pre>;
 };
-type HistoryEntry = { query:string; source:string; path:string; anchor:string; scroll:number; view:'wiki'|'graph' };
+type HistoryEntry = { query:string; searchSource:string; source:string; path:string; anchor:string; scroll:number; view:'wiki'|'graph' };
 type WikiView = {document:Doc;backlinks:Page<Backlink>;links:LinkPage};
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -35,6 +35,8 @@ function App() {
   const [nextHit,setNextHit]=useState<number|null>(null);
   const [nextBack,setNextBack]=useState<number|null>(null);
   const [searched,setSearched]=useState('');
+  const [searchedSource,setSearchedSource]=useState('');
+  const [scope,setScope]=useState<'project'|'source'>('project');
   const [doc, setDoc] = useState<Doc | null>(null);
   const [backlinks, setBacklinks] = useState<Backlink[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
@@ -79,7 +81,7 @@ function App() {
     generation.current++;
     let active = true;
     setHistory({entries:[],position:-1}); pendingScroll.current=null;
-    setDoc(null); setExpanded(false); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ(''); setError('');setStats(null);setView('wiki');
+    setDoc(null); setExpanded(false); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ('');setSearched('');setSearchedSource('');setScope('project'); setError('');setStats(null);setView('wiki');
     if (project) {
       setBusy(true);
       Promise.all([api<Page<Hit>>('search-page', project,{limit:'50'}),api<typeof stats>('stats',project)]).then(async ([h,s]) => {
@@ -96,7 +98,7 @@ function App() {
     return () => { active = false; };
   }, [project,revision]);
   function capture():HistoryEntry {
-    return {query:searched,source,path:doc?.path??'',anchor,scroll:centralPane.current?.scrollTop??0,view};
+    return {query:searched,searchSource:searchedSource,source,path:doc?.path??'',anchor,scroll:centralPane.current?.scrollTop??0,view};
   }
   function record(before:HistoryEntry,after:HistoryEntry){
     setHistory(previous=>{
@@ -113,18 +115,19 @@ function App() {
     setLinks(wiki?.links.items??[]);
     setNextLinkOffset(wiki?.links.next_offset??null);
   }
-  async function search() {
+  async function search(clear=false) {
     if(busy)return;
     const before=capture();
-    const query=q.trim();
+    const query=clear?'':q.trim();
+    const searchSource=query&&scope==='source'?source:'';
     const current=++generation.current;
     setError('');setBusy(true);
     try{
-      const found=await api<Page<Hit>>('search-page',project,{q:query,limit:'50'});
+      const found=await api<Page<Hit>>('search-page',project,{q:query,source:searchSource,limit:'50'});
       if(current!==generation.current)return;
-      setHits(found.items);setNextHit(found.next_offset);setSearched(query);setQ(query);
-      setSource('');applyWiki(null);setAnchor('');setView('wiki');
-      record(before,{query,source:'',path:'',anchor:'',scroll:0,view:'wiki'});
+      setHits(found.items);setNextHit(found.next_offset);setSearched(query);setSearchedSource(searchSource);setQ(query);
+      record(before,{...before,query,searchSource});
+      leftPane.current?.scrollTo(0,0);
     }catch(e){if(current===generation.current)setError(String(e));}
     finally{if(current===generation.current)setBusy(false);}
   }
@@ -158,12 +161,12 @@ function App() {
     setError('');setBusy(true);
     try{
       const [found,wiki]=await Promise.all([
-        entry.query===searched?null:api<Page<Hit>>('search-page',project,{q:entry.query,limit:'50'}),
+        entry.query===searched&&entry.searchSource===searchedSource?null:api<Page<Hit>>('search-page',project,{q:entry.query,source:entry.searchSource,limit:'50'}),
         entry.path?api<WikiView>('wiki-view',project,{path:entry.path}):null,
       ]);
       if(current!==generation.current)return;
       if(found){setHits(found.items);setNextHit(found.next_offset);}
-      setQ(entry.query);setSearched(entry.query);setSource(entry.source);
+      setQ(entry.query);setSearched(entry.query);setSearchedSource(entry.searchSource);setScope(entry.searchSource?'source':'project');setSource(entry.source);
       applyWiki(wiki);setAnchor(entry.anchor);setView(entry.view);
       pendingScroll.current=entry.scroll;
       const entries=history.entries.slice();
@@ -187,7 +190,7 @@ function App() {
     if(offset===null||busy)return;
     const current=generation.current;setBusy(true);setError('');
     try {
-      if(kind==='hits') {const page=await api<Page<Hit>>('search-page',project,{q:searched,offset:String(offset),limit:'50'});if(current===generation.current){setHits(v=>[...v,...page.items]);setNextHit(page.next_offset);}}
+      if(kind==='hits') {const page=await api<Page<Hit>>('search-page',project,{q:searched,source:searchedSource,offset:String(offset),limit:'50'});if(current===generation.current){setHits(v=>[...v,...page.items]);setNextHit(page.next_offset);}}
       else if(doc){const page=await api<Page<Backlink>>('backlink-details',project,{path:doc.path,offset:String(offset),limit:'100'});if(current===generation.current){setBacklinks(v=>[...v,...page.items]);setNextBack(page.next_offset);}}
     }catch(e){if(current===generation.current)setError(String(e));}finally{if(current===generation.current)setBusy(false);}
   }
@@ -235,11 +238,11 @@ function App() {
     if(row.top<bounds.top)pane.scrollTop+=row.top-bounds.top;
     else if(row.bottom>bounds.bottom)pane.scrollTop+=row.bottom-bounds.bottom;
   },[doc?.path,sourcePages,hits,expanded]);
-  const listed=source?sourcePages:hits;
-  const visibleHits=doc&&!source&&!listed.some(hit=>hit.path===doc.path)?[doc,...listed]:listed;
+  const listed=searched?hits:source?sourcePages:hits;
+  const visibleHits=doc&&!searched&&!source&&!listed.some(hit=>hit.path===doc.path)?[doc,...listed]:listed;
   const groups=new Map<string,Hit[]>();
   for(const hit of visibleHits){
-    const kind=source?(hit.path===source?'元仕様書':hit.title.split(' · ')[0]):'文書';
+    const kind=searched?'検索結果':source?(hit.path===source?'元仕様書':hit.title.split(' · ')[0]):'文書';
     const items=groups.get(kind)??[];
     items.push(hit);
     groups.set(kind,items);
@@ -264,14 +267,31 @@ function App() {
   },[doc,links]);
   return <div className={`app ${expanded?'wiki-expanded':''}`}>
     <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
-    <section className="toolbar" aria-label="検索条件">
+    <section className="toolbar" aria-label="プロジェクト選択">
       <label>プロジェクト<select disabled={busy} value={project} onChange={e => setProject(e.target.value)}><option value="" disabled>プロジェクトを選択</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-      <form onSubmit={e => { e.preventDefault(); void search(); }}><label htmlFor="query">全文検索</label><div className="search"><input id="query" value={q} onChange={e => setQ(e.target.value)} placeholder="キーワードを入力（日本語・中文・English）"/><button disabled={!project || busy}>検索</button></div></form>
+
     </section>
     <details className="workspace-settings"><summary>プロジェクト管理・監視</summary><ProjectManager current={projects.find(p=>p.id===project)} enabled={capabilities.admin} folderPicker={capabilities.folder_picker} onChanged={refreshProjects} onBusy={setAdminBusy}/>
     {capabilities.desktop&&project&&<WatchManager key={project} project={project} onRefresh={()=>setRevision(v=>v+1)}/>}</details>
     {stats&&<div className="project-stats"><span>文書 <strong>{stats.documents.toLocaleString()}</strong></span><span>リンク <strong>{stats.links.toLocaleString()}</strong></span><span>リンク先なし <strong>{stats.missing.toLocaleString()}</strong></span><span>同名候補あり <strong>{stats.ambiguous.toLocaleString()}</strong></span><span>見出しなし <strong>{stats.missing_heading.toLocaleString()}</strong></span><span title="他の文書との解決済みリンクがない文書">孤立文書 <strong>{stats.isolated.toLocaleString()}</strong></span><span>同名文書群 <strong>{stats.duplicate_names.toLocaleString()}</strong></span></div>}
-    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button type="button" disabled={busy||history.position<=0} onClick={()=>void moveHistory(-1)}>‹ 戻る</button><button type="button" disabled={busy||history.position>=history.entries.length-1} onClick={()=>void moveHistory(1)}>進む ›</button><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}<button className="expand-workspace" type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'閲覧エリアを全画面に拡大'}</button></div>}
+    {project&&<div className="view-tabs" aria-label="Wiki閲覧操作">
+      <button type="button" disabled={busy||history.position<=0} onClick={()=>void moveHistory(-1)}>‹ 戻る</button>
+      <button type="button" disabled={busy||history.position>=history.entries.length-1} onClick={()=>void moveHistory(1)}>進む ›</button>
+      <div className="wiki-tabs" role="tablist" aria-label="表示切替">
+        <button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button>
+        <button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>
+      </div>
+      {doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}
+      <form className="wiki-search" onSubmit={event=>{event.preventDefault();void search();}}>
+        <input aria-label="全文検索" value={q} onChange={event=>setQ(event.target.value)} placeholder="Wikiを全文検索"/>
+        <select aria-label="検索範囲" value={source?scope:'project'} onChange={event=>setScope(event.target.value as typeof scope)}>
+          <option value="project">プロジェクト全体</option>
+          <option value="source" disabled={!source}>選択中の元仕様書</option>
+        </select>
+        <button disabled={busy||!q.trim()}>検索</button>
+      </form>
+      <button className="expand-workspace" type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'閲覧エリアを全画面に拡大'}</button>
+    </div>}
     {error && <p role="alert" className="error">{error}</p>}
     {!projects.length && !error && <p className="empty">「新規プロジェクト」からMarkdownフォルダを登録してください。</p>}
     <div className="workspace" aria-busy={busy}>
@@ -280,15 +300,19 @@ function App() {
           <option value="">すべての仕様書</option>
           {sources.map(item=><option key={item.path} value={item.path}>{item.title}</option>)}
         </select></label>}
+        {searched&&<div className="search-summary">
+          <span>「{searched}」 · {searchedSource?(sourceTitles.get(searchedSource)??'元仕様書'):'プロジェクト全体'}</span>
+          <button type="button" disabled={busy} onClick={()=>void search(true)}>検索結果を閉じる</button>
+        </div>}
         <div className="source-list" ref={leftPane}>
         {[...groups].map(([kind,items])=><section key={kind}>
           <h2>{kind} <small>{items.length}件</small></h2>
           {items.map(hit=><button disabled={busy} className={`hit ${doc?.path===hit.path?'selected':''}`} key={hit.path} aria-current={doc?.path===hit.path?'page':undefined} onClick={()=>void open(hit.path)}>
-            <strong>{source&&hit.path!==source?hit.title.split(' · ').slice(1).join(' · ')||hit.title:hit.title}</strong>
-            {!source&&<span>{hit.path}</span>}
+            <strong>{source&&!searched&&hit.path!==source?hit.title.split(' · ').slice(1).join(' · ')||hit.title:hit.title}</strong>
+            {(!source||searched)&&<span>{hit.path}</span>}
           </button>)}
         </section>)}
-        {!source&&nextHit!==null&&<button disabled={busy} onClick={()=>void more('hits')}>文書をさらに読み込む</button>}
+        {(searched||!source)&&nextHit!==null&&<button disabled={busy} onClick={()=>void more('hits')}>文書をさらに読み込む</button>}
         {project&&!visibleHits.length&&<p>該当する文書がありません。</p>}
         </div>
       </nav>

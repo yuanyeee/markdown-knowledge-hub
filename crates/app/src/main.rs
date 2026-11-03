@@ -255,6 +255,8 @@ struct LinkParameters {
     #[serde(default)]
     q: String,
     #[serde(default)]
+    source: String,
+    #[serde(default)]
     offset: usize,
     #[serde(default = "default_link_limit")]
     limit: usize,
@@ -333,9 +335,9 @@ async fn document_links(State(data): State<PathBuf>, Query(p): Query<LinkParamet
 }
 async fn search_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
     run(data, move |h| {
-        Ok(serde_json::to_value(
-            h.search_page(&p.project, &p.q, p.offset, p.limit)?,
-        )?)
+        Ok(serde_json::to_value(h.search_page_scoped(
+            &p.project, &p.q, &p.source, p.offset, p.limit,
+        )?)?)
     })
     .await
 }

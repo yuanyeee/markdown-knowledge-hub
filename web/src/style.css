@@ -49,3 +49,9 @@ html,body,#root { height:100%; }
 .mermaid-fullscreen::backdrop { background:#172a36b0; }
 .mermaid-fullscreen .mermaid-viewer { display:flex; flex-direction:column; height:100%; }
 .mermaid-fullscreen .mermaid-scroll { flex:1; min-height:0; }
+.wiki-tabs,.wiki-search { display:flex; align-items:center; gap:6px; }
+.wiki-search { flex:1 1 340px; min-width:0; }
+.wiki-search input { flex:1; min-width:0; border:1px solid #b9c9ce; border-radius:6px; padding:7px 10px; }
+.wiki-search select { max-width:46%; border:1px solid #b9c9ce; border-radius:6px; padding:6px; }
+.search-summary { display:grid; gap:4px; padding:6px 0 10px; font-size:12px; overflow-wrap:anywhere; }
+.search-summary button { justify-self:start; }

@@ -26,9 +26,10 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             text(args, "path")?,
             text(args, "target")?,
         )?)?,
-        "search-page" => serde_json::to_value(hub.search_page(
+        "search-page" => serde_json::to_value(hub.search_page_scoped(
             text(args, "project")?,
             args.get("q").and_then(Value::as_str).unwrap_or(""),
+            args.get("source").and_then(Value::as_str).unwrap_or(""),
             number(args, "offset", 0)?,
             number(args, "limit", 50)?,
         )?)?,
