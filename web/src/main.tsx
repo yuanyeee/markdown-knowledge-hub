@@ -1,6 +1,6 @@
 import { MermaidDiagram } from './MermaidDiagram';
 import { remarkFlowTables } from './flowTables';
-import React, { Suspense,lazy,useEffect, useRef, useState } from 'react';
+import React, { Suspense,lazy,useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Markdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -25,6 +25,7 @@ const WikiPre: NonNullable<Components['pre']> = ({children,node: _node,...props}
   }
   return <pre {...props}>{children}</pre>;
 };
+type WikiView = {document:Doc;backlinks:Page<Backlink>;links:LinkPage};
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState('');
@@ -43,10 +44,18 @@ function App() {
   const busy=readBusy||adminBusy;
   const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean}>({admin:false,folder_picker:false});
   const [stats,setStats]=useState<{documents:number;links:number;missing:number;missing_heading:number;ambiguous:number;isolated:number;duplicate_names:number}|null>(null);
+  const [expanded,setExpanded]=useState(false);
+  const leftPane=useRef<HTMLElement>(null);
   const centralPane=useRef<HTMLElement>(null);
   const [anchor,setAnchor]=useState('');
   useEffect(()=>{if(anchor&&doc){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
   useEffect(()=>{if(!anchor)centralPane.current?.scrollTo(0,0);},[doc?.path,anchor]);
+  useEffect(()=>{
+    if(!expanded)return;
+    const exit=(event:KeyboardEvent)=>{if(event.key==='Escape')setExpanded(false);};
+    window.addEventListener('keydown',exit);
+    return ()=>window.removeEventListener('keydown',exit);
+  },[expanded]);
   const [view,setView]=useState<'wiki'|'graph'>('wiki');
   const [revision,setRevision]=useState(0);
   const generation = useRef(0);
@@ -60,7 +69,7 @@ function App() {
   useEffect(() => {
     generation.current++;
     let active = true;
-    setDoc(null); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ(''); setError('');setStats(null);setView('wiki');
+    setDoc(null); setExpanded(false); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ(''); setError('');setStats(null);setView('wiki');
     if (project) {
       setBusy(true);
       Promise.all([api<Page<Hit>>('search-page', project,{limit:'50'}),api<typeof stats>('stats',project)]).then(async ([h,s]) => {
@@ -68,7 +77,7 @@ function App() {
         setHits(h.items);setNextHit(h.next_offset);setSearched('');setStats(s);
         if(h.items[0]) {
           const path=h.items[0].path;
-          const [d,b,page]=await Promise.all([api<Doc>('document',project,{path}),api<Page<Backlink>>('backlink-details',project,{path,limit:'100'}),api<LinkPage>('document-links',project,{path})]);
+          const {document:d,backlinks:b,links:page}=await api<WikiView>('wiki-view',project,{path});
           if(active){setDoc(d);setBacklinks(b.items);setNextBack(b.next_offset);setLinks(page.items);setNextLinkOffset(page.next_offset);}
         }
       })
@@ -85,11 +94,17 @@ function App() {
   }
   async function open(path: string, fragment='') {
     if(busy)return;
+    if(path===doc?.path){
+      setView('wiki');
+      setAnchor(fragment);
+      if(!fragment)centralPane.current?.scrollTo(0,0);
+      return;
+    }
     const current = ++generation.current;
     setError(''); setBusy(true);
     try {
-      const [d, b, page] = await Promise.all([api<Doc>('document', project, { path }), api<Page<Backlink>>('backlink-details', project, { path,limit:'100' }), api<LinkPage>('document-links', project, { path })]);
-      if (current === generation.current) { setDoc(d); setBacklinks(b.items);setNextBack(b.next_offset); setLinks(page.items); setNextLinkOffset(page.next_offset);setAnchor(fragment);setView('wiki'); }
+      const {document:d,backlinks:b,links:page}=await api<WikiView>('wiki-view',project,{path});
+      if (current === generation.current) { setDoc(d); syncSource(d.path); setBacklinks(b.items);setNextBack(b.next_offset); setLinks(page.items); setNextLinkOffset(page.next_offset);setAnchor(fragment);setView('wiki'); }
     } catch (e) { if (current === generation.current) setError(String(e)); }
     finally { if (current === generation.current) setBusy(false); }
   }
@@ -136,7 +151,22 @@ function App() {
     }).catch(e=>{if(active)setError(String(e));});
     return ()=>{active=false;};
   },[project,source,revision]);
-  const visibleHits=source?sourcePages:hits;
+  function syncSource(path:string){
+    const folder=path.split('/')[0];
+    const match=sources.find(item=>item.path===path||item.path===folder+'.md');
+    setSource(current=>match?.path??(current?'':current));
+  }
+  useEffect(()=>{
+    const pane=leftPane.current;
+    const selected=pane?.querySelector<HTMLElement>('[aria-current="page"]');
+    if(!pane||!selected)return;
+    const bounds=pane.getBoundingClientRect();
+    const row=selected.getBoundingClientRect();
+    if(row.top<bounds.top)pane.scrollTop+=row.top-bounds.top;
+    else if(row.bottom>bounds.bottom)pane.scrollTop+=row.bottom-bounds.bottom;
+  },[doc?.path,sourcePages,hits,expanded]);
+  const listed=source?sourcePages:hits;
+  const visibleHits=doc&&!source&&!listed.some(hit=>hit.path===doc.path)?[doc,...listed]:listed;
   const groups=new Map<string,Hit[]>();
   for(const hit of visibleHits){
     const kind=source?(hit.path===source?'元仕様書':hit.title.split(' · ')[0]):'文書';
@@ -145,6 +175,23 @@ function App() {
     groups.set(kind,items);
   }
   const outgoing = links.filter(l => l.source === doc?.path);
+  const wikiNavigation=useRef({open,navigate});
+  wikiNavigation.current={open,navigate};
+  const wikiBody=useMemo(()=>{
+    if(!doc)return null;
+    const outgoing=links.filter(link=>link.source===doc.path);
+    return <Markdown skipHtml remarkPlugins={[remarkGfm,remarkWiki,remarkFlowTables]} rehypePlugins={[rehypeHeadingIds]} components={{
+        pre: WikiPre,
+        a: ({ href, children }) => {
+          const link = outgoing.find(l => sameTarget(href, l.target));
+          if (link?.resolved) return <button className="inline" onClick={() => void wikiNavigation.current.open(link.resolved!,link.target.split('#').slice(1).join('#'))}>{children}</button>;
+          if (href?.startsWith('https://') || href?.startsWith('http://')) return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+          if(href&&!link)return <button className="inline" onClick={()=>void wikiNavigation.current.navigate(href)}>{children}</button>;
+          return <span title="リンク先または見出しがありません">{children}</span>;
+        },
+        img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
+      }}>{displayMarkdown(doc.markdown)}</Markdown>;
+  },[doc,links]);
   return <div className="app">
     <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
     <section className="toolbar" aria-label="検索条件">
@@ -154,18 +201,18 @@ function App() {
     <details className="workspace-settings"><summary>プロジェクト管理・監視</summary><ProjectManager current={projects.find(p=>p.id===project)} enabled={capabilities.admin} folderPicker={capabilities.folder_picker} onChanged={refreshProjects} onBusy={setAdminBusy}/>
     {capabilities.desktop&&project&&<WatchManager key={project} project={project} onRefresh={()=>setRevision(v=>v+1)}/>}</details>
     {stats&&<div className="project-stats"><span>文書 <strong>{stats.documents.toLocaleString()}</strong></span><span>リンク <strong>{stats.links.toLocaleString()}</strong></span><span>リンク先なし <strong>{stats.missing.toLocaleString()}</strong></span><span>同名候補あり <strong>{stats.ambiguous.toLocaleString()}</strong></span><span>見出しなし <strong>{stats.missing_heading.toLocaleString()}</strong></span><span title="他の文書との解決済みリンクがない文書">孤立文書 <strong>{stats.isolated.toLocaleString()}</strong></span><span>同名文書群 <strong>{stats.duplicate_names.toLocaleString()}</strong></span></div>}
-    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}</div>}
+    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>(setExpanded(false),setView('graph'))}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}</div>}
     {error && <p role="alert" className="error">{error}</p>}
     {!projects.length && !error && <p className="empty">「新規プロジェクト」からMarkdownフォルダを登録してください。</p>}
-    <div className="workspace" aria-busy={busy}>
-      <nav aria-label="文書一覧">
+    <div className={`workspace ${expanded?'wiki-expanded':''}`} aria-busy={busy}>
+      <nav ref={leftPane} aria-label="文書一覧">
         {sources.length>0&&<label>元仕様書<select aria-label="元仕様書" value={source} onChange={e=>setSource(e.target.value)}>
           <option value="">すべての仕様書</option>
           {sources.map(item=><option key={item.path} value={item.path}>{item.title}</option>)}
         </select></label>}
         {[...groups].map(([kind,items])=><section key={kind}>
           <h2>{kind} <small>{items.length}件</small></h2>
-          {items.map(hit=><button disabled={busy} className={`hit ${doc?.path===hit.path?'selected':''}`} key={hit.path} onClick={()=>void open(hit.path)}>
+          {items.map(hit=><button disabled={busy} className={`hit ${doc?.path===hit.path?'selected':''}`} key={hit.path} aria-current={doc?.path===hit.path?'page':undefined} onClick={()=>void open(hit.path)}>
             <strong>{source&&hit.path!==source?hit.title.split(' · ').slice(1).join(' · ')||hit.title:hit.title}</strong>
             {!source&&<span>{hit.path}</span>}
           </button>)}
@@ -173,27 +220,19 @@ function App() {
         {!source&&nextHit!==null&&<button disabled={busy} onClick={()=>void more('hits')}>文書をさらに読み込む</button>}
         {project&&!visibleHits.length&&<p>該当する文書がありません。</p>}
       </nav>
-      <main ref={centralPane}>{view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div><Markdown skipHtml remarkPlugins={[remarkGfm,remarkWiki,remarkFlowTables]} rehypePlugins={[rehypeHeadingIds]} components={{
-        pre: WikiPre,
-        a: ({ href, children }) => {
-          const link = outgoing.find(l => sameTarget(href, l.target));
-          if (link?.resolved) return <button className="inline" onClick={() => void open(link.resolved!,link.target.split('#').slice(1).join('#'))}>{children}</button>;
-          if (href?.startsWith('https://') || href?.startsWith('http://')) return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
-          if(href&&!link)return <button className="inline" onClick={()=>void navigate(href)}>{children}</button>;
-          return <span title="リンク先または見出しがありません">{children}</span>;
-        },
-        img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
-      }}>{displayMarkdown(doc.markdown)}</Markdown></> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
+      <main ref={centralPane}>
+      {doc&&view==='wiki'&&<div className="wiki-view-actions"><button type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'Wikiを全画面に拡大'}</button></div>}
+      {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>{wikiBody}</> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
       <aside>
         <h2>参照元</h2>
-        {backlinks.map(item=><button className="hit" key={item.path} onClick={()=>void open(item.path)}>
+        {backlinks.map(item=><button className="hit" key={item.path} disabled={busy} onClick={()=>void open(item.path)}>
           <strong>{item.title}</strong><span>{item.call?'呼び出し元':'文書参照'} · {item.path}</span>
         </button>)}
         {nextBack!==null&&<button disabled={busy} onClick={()=>void more('backlinks')}>参照元をさらに読み込む</button>}
         {!backlinks.length&&<p>参照元はありません。</p>}
         <h2>参照先</h2>
         {outgoing.filter(link=>link.resolved!==doc?.path).map((link,index)=><div className="link" key={index}>
-          {link.resolved?<button className="hit" onClick={()=>void open(link.resolved!,link.target.split('#').slice(1).join('#'))}>
+          {link.resolved?<button className="hit" disabled={busy} onClick={()=>void open(link.resolved!,link.target.split('#').slice(1).join('#'))}>
             <strong>{link.resolved_title??link.target}</strong><span>{link.target.endsWith('#oml-call')?'呼び出し先':'文書参照'}</span>
           </button>:<span>{link.target}<small> {link.status==='ambiguous'?'同名候補あり':link.status==='missing-heading'?'見出しなし':'リンク先なし'}</small></span>}
         </div>)}

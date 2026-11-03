@@ -8,6 +8,25 @@ pub struct Element<'a> {
     pub anchors: Vec<String>,
 }
 
+fn detail_heading(title: &str) -> bool {
+    let title = title.split(['(', '（']).next().unwrap_or(title).trim();
+    matches!(
+        title,
+        "入力パラメータ"
+            | "出力パラメータ"
+            | "入出力パラメータ"
+            | "ローカル変数"
+            | "処理フロー"
+            | "処理フロー図"
+            | "処理詳細"
+            | "パラメータ"
+            | "変数"
+            | "説明"
+            | "概要"
+            | "属性"
+    )
+}
+
 pub fn extract(source: &str) -> Vec<Element<'_>> {
     let mut headings = Vec::new();
     let mut heading = None;
@@ -38,6 +57,9 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
     for (index, (level, offset, title)) in headings.iter().enumerate() {
         if *level <= HeadingLevel::H2 {
             section = title;
+        }
+        if detail_heading(title) {
+            continue;
         }
         let prefixes = [
             ("画面:", "画面"),
@@ -83,7 +105,7 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
         };
         let end = headings[index + 1..]
             .iter()
-            .find(|(next, _, _)| next <= level)
+            .find(|(next, _, title)| next < level || (next == level && !detail_heading(title)))
             .map_or(source.len(), |(_, offset, _)| *offset);
         elements.push(Element {
             kind,
@@ -172,4 +194,26 @@ pub fn route_fragments(
     }
     result.push_str(&markdown[end..]);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sibling_detail_headings_stay_inside_the_action() {
+        let markdown = "# 画面: Edit\n\n## スクリーンアクション\n\n### Save\n\n### 入力パラメータ (1)\n\nInput\n\n### ローカル変数\n\nLocal\n\n### 処理フロー\n\nFlow\n\n### Cancel\n\nCancel body\n";
+        let elements = extract(markdown);
+        assert_eq!(
+            elements
+                .iter()
+                .map(|element| element.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Edit", "Save", "Cancel"]
+        );
+        for heading in ["入力パラメータ", "ローカル変数", "処理フロー"] {
+            assert!(elements[1].body.contains(heading));
+        }
+        assert!(!elements[1].body.contains("Cancel body"));
+    }
 }

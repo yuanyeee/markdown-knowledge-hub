@@ -185,6 +185,7 @@ fn router(data: PathBuf) -> Router {
         .route("/api/search", get(search))
         .route("/api/search-page", get(search_page))
         .route("/api/oml-catalog", get(oml_catalog))
+        .route("/api/wiki-view", get(wiki_view))
         .route("/api/backlink-details", get(backlink_details))
         .route("/api/backlinks-page", get(backlinks_page))
         .route("/api/document", get(document))
@@ -341,6 +342,18 @@ async fn search_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters
 async fn oml_catalog(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
     run(data, move |h| {
         Ok(serde_json::to_value(h.oml_catalog(&p.project, &p.path)?)?)
+    })
+    .await
+}
+async fn wiki_view(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |mut hub| {
+        hub_service::call(
+            &mut hub,
+            "wiki-view",
+            &serde_json::json!({
+                "project": p.project, "path": p.path
+            }),
+        )
     })
     .await
 }

@@ -36,6 +36,15 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             text(args, "project")?,
             args.get("path").and_then(Value::as_str).unwrap_or(""),
         )?)?,
+        "wiki-view" => {
+            let project = text(args, "project")?;
+            let path = text(args, "path")?;
+            json!({
+                "document": hub.document(project, path)?,
+                "backlinks": hub.backlink_details(project, path, 0, 100)?,
+                "links": hub.links_page(project, path, 0, 100)?,
+            })
+        }
         "backlink-details" => serde_json::to_value(hub.backlink_details(
             text(args, "project")?,
             text(args, "path")?,
