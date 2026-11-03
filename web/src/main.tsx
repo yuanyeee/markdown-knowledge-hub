@@ -48,18 +48,24 @@ function App() {
   const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean}>({admin:false,folder_picker:false});
   const [stats,setStats]=useState<{documents:number;links:number;missing:number;missing_heading:number;ambiguous:number;isolated:number;duplicate_names:number}|null>(null);
   const [expanded,setExpanded]=useState(false);
+  const [graphExpanded,setGraphExpanded]=useState(false);
   const leftPane=useRef<HTMLDivElement>(null);
   const centralPane=useRef<HTMLElement>(null);
   const [anchor,setAnchor]=useState('');
   useEffect(()=>{if(anchor&&doc){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
   useEffect(()=>{if(!anchor)centralPane.current?.scrollTo(0,0);},[doc?.path,anchor]);
   useEffect(()=>{
-    if(!expanded)return;
-    const exit=(event:KeyboardEvent)=>{if(event.key==='Escape')setExpanded(false);};
+    if(!expanded&&!graphExpanded)return;
+    const exit=(event:KeyboardEvent)=>{
+      if(event.key!=='Escape'||event.defaultPrevented)return;
+      if(graphExpanded)setGraphExpanded(false);
+      else setExpanded(false);
+    };
     window.addEventListener('keydown',exit);
     return ()=>window.removeEventListener('keydown',exit);
-  },[expanded]);
+  },[expanded,graphExpanded]);
   const [view,setView]=useState<'wiki'|'graph'>('wiki');
+  useEffect(()=>{if(view!=='graph')setGraphExpanded(false);},[view]);
   const [revision,setRevision]=useState(0);
   const generation = useRef(0);
   const [history,setHistory]=useState<{entries:HistoryEntry[];position:number}>({entries:[],position:-1});
@@ -81,7 +87,7 @@ function App() {
     generation.current++;
     let active = true;
     setHistory({entries:[],position:-1}); pendingScroll.current=null;
-    setDoc(null); setExpanded(false); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ('');setSearched('');setSearchedSource('');setScope('project'); setError('');setStats(null);setView('wiki');
+    setDoc(null); setExpanded(false); setGraphExpanded(false); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ('');setSearched('');setSearchedSource('');setScope('project'); setError('');setStats(null);setView('wiki');
     if (project) {
       setBusy(true);
       Promise.all([api<Page<Hit>>('search-page', project,{limit:'50'}),api<typeof stats>('stats',project)]).then(async ([h,s]) => {
@@ -265,7 +271,7 @@ function App() {
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{displayMarkdown(doc.markdown)}</Markdown>;
   },[doc,links]);
-  return <div className={`app ${expanded?'wiki-expanded':''}`}>
+  return <div className={`app ${expanded?'wiki-expanded':''} ${graphExpanded&&view==='graph'?'graph-expanded':''}`}>
     <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
     <section className="toolbar" aria-label="プロジェクト選択">
       <label>プロジェクト<select disabled={busy} value={project} onChange={e => setProject(e.target.value)}><option value="" disabled>プロジェクトを選択</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
@@ -318,7 +324,7 @@ function App() {
       </nav>
       <main ref={centralPane}>
 
-      {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>{wikiBody}</> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
+      {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} expanded={graphExpanded} onToggleExpand={()=>setGraphExpanded(value=>!value)} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>{wikiBody}</> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
       <aside>
         <h2>参照元</h2>
         {backlinks.map(item=><button className="hit" key={item.path} disabled={busy} onClick={()=>void open(item.path)}>

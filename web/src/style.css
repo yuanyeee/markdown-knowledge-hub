@@ -55,3 +55,13 @@ html,body,#root { height:100%; }
 .wiki-search select { max-width:46%; border:1px solid #b9c9ce; border-radius:6px; padding:6px; }
 .search-summary { display:grid; gap:4px; padding:6px 0 10px; font-size:12px; overflow-wrap:anywhere; }
 .search-summary button { justify-self:start; }
+.link-graph-controls { display:flex; gap:8px; flex-wrap:wrap; }
+.link-graph-controls button { border:1px solid #cad8d1; border-radius:6px; padding:6px 10px; background:#f1f7f3; color:#245f4c; }
+.app.graph-expanded { position:fixed; inset:0; z-index:21; max-width:none; height:100dvh; padding:12px; background:#f3f5f8; }
+.app.graph-expanded > :not(.workspace):not(.error),.app.graph-expanded > .workspace > nav,.app.graph-expanded > .workspace > aside { display:none; }
+.app.graph-expanded > .workspace { display:grid; grid-template-columns:minmax(0,1fr); }
+.app.graph-expanded > .workspace > main { padding:14px; }
+.app.graph-expanded .link-graph { display:flex; flex-direction:column; height:100%; min-height:300px; }
+.app.graph-expanded .link-graph h2,.app.graph-expanded .link-graph p { margin:5px 0; }
+.app.graph-expanded .graph-canvas { flex:1; min-height:180px; height:auto; }
+.app.graph-expanded .link-graph details { max-height:20vh; overflow:auto; }
