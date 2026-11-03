@@ -1,10 +1,12 @@
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::borrow::Cow;
 
 pub struct Element<'a> {
     pub kind: &'static str,
     pub title: String,
     pub line: usize,
-    pub body: &'a str,
+    pub body: Cow<'a, str>,
+    pub timer_action: Option<String>,
     pub anchors: Vec<String>,
 }
 
@@ -49,13 +51,19 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
         }
     }
     let mut section = "";
+    let mut rest = false;
+    let mut module_definitions = false;
     let mut elements = Vec::new();
     let newlines: Vec<_> = source
         .match_indices('\n')
         .map(|(offset, _)| offset)
         .collect();
     for (index, (level, offset, title)) in headings.iter().enumerate() {
+        if *level == HeadingLevel::H1 {
+            rest = title.ends_with(" REST / SOAP 連携");
+        }
         if *level <= HeadingLevel::H2 {
+            module_definitions = title == "その他のモジュール定義";
             section = title;
         }
         if detail_heading(title) {
@@ -63,6 +71,9 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
         }
         let prefixes = [
             ("画面:", "画面"),
+            ("Web ブロック:", "Webブロック"),
+            ("サービスアクション:", "サービスアクション"),
+            ("タイマー:", "タイマー"),
             ("サーバーアクション:", "サーバーアクション"),
             ("クライアントアクション:", "クライアントアクション"),
             ("エンティティ:", "Entity"),
@@ -74,6 +85,22 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
             .iter()
             .find_map(|(prefix, kind)| title.strip_prefix(prefix).map(|name| (*kind, name.trim())))
             .or_else(|| {
+                if rest && *level == HeadingLevel::H2 {
+                    return [("REST", "REST"), ("SOAP", "SOAP"), ("連携", "REST / SOAP")]
+                        .into_iter()
+                        .find_map(|(protocol, kind)| {
+                            let marker = format!(" ({protocol}");
+                            let (name, suffix) = title.strip_suffix(')')?.rsplit_once(&marker)?;
+                            matches!(suffix, "" | " (公開)" | " (消費)").then_some((kind, name))
+                        });
+                }
+                if *level == HeadingLevel::H2 {
+                    return match title.as_str() {
+                        "サイトプロパティ" => Some(("サイトプロパティ", "一覧")),
+                        "セッション変数" => Some(("セッション変数", "一覧")),
+                        _ => None,
+                    };
+                }
                 if *level != HeadingLevel::H3 {
                     return None;
                 }
@@ -98,18 +125,62 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
         if let Some(id) = explicit.filter(|id| *id != anchors[0]) {
             anchors.push(id.to_owned());
         }
-        let Some((kind, title)) = classified.filter(|(_, title)| !title.is_empty()) else {
-            continue;
-        };
         let end = headings[index + 1..]
             .iter()
             .find(|(next, _, title)| next < level || (next == level && !detail_heading(title)))
             .map_or(source.len(), |(_, offset, _)| *offset);
+        let definition_kind = match title.as_str() {
+            "タイマー" => Some("タイマー"),
+            "公開 Web サービス (SOAP)" => Some("公開SOAP"),
+            _ => None,
+        };
+        if module_definitions
+            && *level == HeadingLevel::H3
+            && let Some(kind) = definition_kind
+        {
+            let markdown = &source[*offset..end];
+            let mut cells = Vec::new();
+            for (event, span) in
+                Parser::new_ext(markdown, Options::ENABLE_TABLES).into_offset_iter()
+            {
+                match event {
+                    Event::Start(Tag::TableRow) => cells.clear(),
+                    Event::End(TagEnd::TableCell) => cells.push(markdown[span].trim()),
+                    Event::End(TagEnd::TableRow) if cells.len() == 3 && !cells[0].is_empty() => {
+                        let action = (kind == "タイマー")
+                            .then(|| {
+                                cells[2]
+                                    .split("<br>")
+                                    .find_map(|part| part.trim().strip_prefix("Action: "))
+                            })
+                            .flatten();
+                        elements.push(Element {
+                            kind,
+                            title: cells[0].replace("\\", ""),
+                            line: newlines
+                                .partition_point(|position| *position < offset + span.start)
+                                + 1,
+                            body: Cow::Owned(format!(
+                                "| 名前 | 説明 | 詳細 |\n|---|---|---|\n{}\n",
+                                markdown[span].trim()
+                            )),
+                            timer_action: action.map(str::to_owned),
+                            anchors: vec![],
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some((kind, title)) = classified.filter(|(_, title)| !title.is_empty()) else {
+            continue;
+        };
         elements.push(Element {
             kind,
             title: title.to_owned(),
             line: newlines.partition_point(|position| position < offset) + 1,
-            body: &source[*offset..end],
+            body: Cow::Borrowed(&source[*offset..end]),
+            timer_action: None,
             anchors,
         });
     }
@@ -205,20 +276,25 @@ pub fn route_fragments(
     anchors: &std::collections::BTreeMap<String, Vec<usize>>,
     prefix: &str,
 ) -> String {
-    use pulldown_cmark::Options;
+    route_links(markdown, |url| {
+        let fragment = percent_encoding::percent_decode_str(url.strip_prefix('#')?)
+            .decode_utf8()
+            .ok()?;
+        let [number] = anchors.get(fragment.as_ref())?.as_slice() else {
+            return None;
+        };
+        Some(format!("{prefix}{number}.md"))
+    })
+}
+
+pub fn route_links(markdown: &str, mut target: impl FnMut(&str) -> Option<String>) -> String {
     let mut result = String::new();
     let mut end = 0;
     for (event, span) in Parser::new_ext(markdown, Options::ENABLE_TABLES).into_offset_iter() {
         let Event::Start(Tag::Link { dest_url, .. }) = event else {
             continue;
         };
-        let Some(fragment) = dest_url.strip_prefix('#') else {
-            continue;
-        };
-        let Ok(fragment) = percent_encoding::percent_decode_str(fragment).decode_utf8() else {
-            continue;
-        };
-        let Some([number]) = anchors.get(fragment.as_ref()).map(Vec::as_slice) else {
+        let Some(target) = target(&dest_url) else {
             continue;
         };
         let original = &markdown[span.clone()];
@@ -230,7 +306,8 @@ pub fn route_fragments(
         }
         result.push_str(&markdown[end..span.start]);
         result.push_str(&original[..label_end + 2]);
-        result.push_str(&format!("{prefix}{number}.md)"));
+        result.push_str(&target);
+        result.push(')');
         end = span.end;
     }
     result.push_str(&markdown[end..]);

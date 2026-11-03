@@ -12,6 +12,7 @@ struct Spec {
     path: PathBuf,
     source: String,
     supplemental: bool,
+    details: Vec<(PathBuf, String)>,
     references: Vec<(String, usize, bool)>,
 }
 
@@ -89,6 +90,7 @@ fn parse(path: PathBuf, source: String) -> Option<Spec> {
         path,
         source,
         supplemental,
+        details: Vec::new(),
         references,
     })
 }
@@ -134,6 +136,7 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
     ensure!(!destination.exists(), "未使用の生成先を指定してください");
 
     let mut specs = Vec::new();
+    let mut details = Vec::new();
     for entry in walkdir::WalkDir::new(&input)
         .follow_links(false)
         .sort_by_file_name()
@@ -146,9 +149,37 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
         {
             let relative = entry.path().strip_prefix(&input)?.to_owned();
-            if let Some(spec) = parse(relative, fs::read_to_string(entry.path())?) {
+            let folder = relative.parent().unwrap_or(Path::new(""));
+            let owner = match relative.file_name().and_then(|name| name.to_str()) {
+                Some("rest.md" | "data.md") => Some(folder.join("index.md")),
+                _ if folder
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| matches!(name, "screens" | "webblocks" | "actions")) =>
+                {
+                    folder.parent().map(|parent| parent.join("index.md"))
+                }
+                _ => None,
+            };
+            let source = fs::read_to_string(entry.path())?;
+            if let Some(owner) = owner {
+                details.push((owner, relative, source));
+            } else if let Some(spec) = parse(relative, source) {
                 specs.push(spec);
             }
+        }
+    }
+    let owners: BTreeMap<_, _> = specs
+        .iter()
+        .enumerate()
+        .filter(|(_, spec)| !spec.supplemental)
+        .map(|(index, spec)| (spec.path.clone(), index))
+        .collect();
+    for (owner, relative, source) in details {
+        if let Some(&index) = owners.get(&owner) {
+            specs[index].details.push((relative, source));
+        } else if let Some(spec) = parse(relative, source) {
+            specs.push(spec);
         }
     }
     ensure!(
@@ -208,12 +239,21 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
     }
     let extracted: Vec<_> = specs
         .iter()
-        .map(|spec| crate::oml_elements::extract(&spec.source))
+        .map(|spec| {
+            std::iter::once((&spec.path, &spec.source))
+                .chain(spec.details.iter().map(|(path, source)| (path, source)))
+                .flat_map(|(path, source)| {
+                    crate::oml_elements::extract(source)
+                        .into_iter()
+                        .map(move |element| (path, element))
+                })
+                .collect::<Vec<_>>()
+        })
         .collect();
     let mut types = BTreeMap::<(&str, &str), Vec<(usize, usize)>>::new();
     let mut actions = BTreeMap::<(usize, &str), Vec<usize>>::new();
     for (id, elements) in extracted.iter().enumerate() {
-        for (number, element) in elements.iter().enumerate() {
+        for (number, (_, element)) in elements.iter().enumerate() {
             if matches!(element.kind, "Structure" | "Entity") {
                 types
                     .entry((&specs[id].name, &element.title))
@@ -240,17 +280,71 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
         );
         let elements = &extracted[id];
         let mut anchors = BTreeMap::<String, Vec<usize>>::new();
-        for (number, element) in elements.iter().enumerate() {
+        let mut detail_pages = BTreeMap::<&Path, Vec<usize>>::new();
+        for (number, (source, element)) in elements.iter().enumerate() {
             for anchor in &element.anchors {
                 anchors.entry(anchor.clone()).or_default().push(number + 1);
             }
+            if *source != &spec.path {
+                detail_pages
+                    .entry(source.as_path())
+                    .or_default()
+                    .push(number + 1);
+            }
         }
+        let module_page = page(id);
+        let folder = module_page.trim_end_matches(".md");
+        let route_file = |source: &Path, url: &str, prefix: &str| {
+            let (url, fragment) = url.split_once('#').map_or((url, ""), |pair| pair);
+            if url.is_empty() || url.contains(':') || url.starts_with('/') {
+                return None;
+            }
+            let url = percent_encoding::percent_decode_str(url)
+                .decode_utf8()
+                .ok()?;
+            let mut path = source.parent()?.to_path_buf();
+            for component in Path::new(url.as_ref()).components() {
+                match component {
+                    std::path::Component::Normal(part) => path.push(part),
+                    std::path::Component::ParentDir if path.pop() => {}
+                    std::path::Component::CurDir => {}
+                    _ => return None,
+                }
+            }
+            if path == spec.path {
+                return Some(format!("{prefix}{module_page}"));
+            }
+            let numbers = detail_pages.get(path.as_path())?;
+            if !fragment.is_empty() {
+                let fragment = percent_encoding::percent_decode_str(fragment)
+                    .decode_utf8()
+                    .ok()?;
+                let mut matches = numbers.iter().filter(|&&number| {
+                    elements[number - 1]
+                        .1
+                        .anchors
+                        .iter()
+                        .any(|anchor| anchor == fragment.as_ref())
+                });
+                if let (Some(number), None) = (matches.next(), matches.next()) {
+                    return Some(format!("{prefix}{folder}/{number}.md"));
+                }
+            }
+            if let [number] = numbers.as_slice() {
+                return Some(format!("{prefix}{folder}/{number}.md"));
+            }
+            let detail = spec.details.iter().find(|(detail, _)| detail == &path)?;
+            let title = detail.1.lines().find_map(|line| line.strip_prefix("# "))?;
+            let anchor = crate::parser::heading_id(title);
+            Some(format!(
+                "{prefix}{module_page}#{}",
+                percent_encoding::utf8_percent_encode(&anchor, percent_encoding::NON_ALPHANUMERIC)
+            ))
+        };
         if !elements.is_empty() {
-            let module_page = page(id);
-            let folder = module_page.trim_end_matches(".md");
             fs::create_dir(destination.join(folder))?;
             body.push_str("\n## 要素別Wiki\n\n");
-            for (number, element) in elements.iter().enumerate() {
+            for (number, (source, element)) in elements.iter().enumerate() {
                 let title = format!("{} · {}", element.kind, literal(&element.title));
                 let relative = format!("{folder}/{}.md", number + 1);
                 body.push_str(&format!("- [{title}]({relative})\n"));
@@ -275,16 +369,23 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                     .unwrap_or_default();
                 let mut content = format!(
                     "# {title}\n\n[元仕様書ページ](../{module_page}{fragment}) · {} {} 行\n\n{}",
-                    literal(&spec.path.to_string_lossy()),
+                    literal(&source.to_string_lossy()),
                     element.line,
-                    crate::oml_elements::route_fragments(element.body, &anchors, "")
+                    crate::oml_elements::route_links(
+                        &crate::oml_elements::route_fragments(&element.body, &anchors, ""),
+                        |url| route_file(source, url, "../")
+                    )
                 );
                 content.push_str("\n<a id=\"oml-call\"></a>\n");
                 if element.kind == "画面"
                     || element.kind.contains("アクション")
-                    || element.kind == "関数"
+                    || matches!(
+                        element.kind,
+                        "関数" | "Webブロック" | "REST" | "SOAP" | "REST / SOAP" | "タイマー"
+                    )
                 {
-                    let calls = crate::oml_elements::calls(element.body);
+                    let mut calls = crate::oml_elements::calls(&element.body);
+                    calls.extend(element.timer_action.iter().cloned());
                     if !calls.is_empty() {
                         content.push_str("\n## 処理フローの呼び出し先\n\n");
                     }
@@ -320,7 +421,7 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                     }
                 }
                 let mut type_links = String::new();
-                for name in crate::oml_elements::declared_types(element.body) {
+                for name in crate::oml_elements::declared_types(&element.body) {
                     let (module, target) = name.rsplit_once('.').unwrap_or((&spec.name, &name));
                     if let Some([(target_id, target_number)]) =
                         types.get(&(module, target)).map(Vec::as_slice)
@@ -353,13 +454,20 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
             }
         }
         body.push_str("\n## 元仕様書\n\n");
-        let module_page = page(id);
-        let prefix = format!("{}/", module_page.trim_end_matches(".md"));
-        body.push_str(&crate::oml_elements::route_fragments(
-            &spec.source,
-            &anchors,
-            &prefix,
-        ));
+        let prefix = format!("{folder}/");
+        for (source, raw) in std::iter::once((&spec.path, &spec.source))
+            .chain(spec.details.iter().map(|(path, raw)| (path, raw)))
+        {
+            let rendered = crate::oml_elements::route_fragments(raw, &anchors, &prefix);
+            if spec.details.is_empty() {
+                body.push_str(&rendered);
+            } else {
+                body.push_str(&crate::oml_elements::route_links(&rendered, |url| {
+                    route_file(source, url, "")
+                }));
+            }
+            body.push_str("\n\n");
+        }
         fs::write(destination.join(page(id)), body)?;
     }
     fs::write(destination.join("index.md"), index)?;
@@ -468,6 +576,88 @@ mod tests {
                 .iter()
                 .any(|hit| hit.title == "Structure · OrderInput")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn split_oml_details_are_grouped_and_linked_to_their_module() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let wiki = temp.path().join("wiki");
+        for folder in ["screens", "webblocks", "actions"] {
+            fs::create_dir_all(input.join(folder))?;
+        }
+        fs::write(
+            input.join("index.md"),
+            "# Orders モジュール仕様書\n\n[画面](screens/Edit.md) / [連携](rest.md)\n\n## サイトプロパティ\n\n| 名前 | 型 |\n|---|---|\n| Enabled | Boolean |\n\n## セッション変数\n\n| 名前 | 型 |\n|---|---|\n| Cart | Text |\n\n## その他のモジュール定義\n\n### タイマー\n\n| 名前 | 説明 | 詳細 |\n|---|---|---|\n| Nightly | 日次処理 | Action: Save<br>Schedule: Daily |\n| Weekly | 週次処理 | Action: Save |\n\n### ロール\n\n| 名前 | 説明 | 詳細 |\n|---|---|---|\n| Admin | 管理者 | |\n",
+        )?;
+        fs::write(
+            input.join("screens/Edit.md"),
+            "# 画面: Edit\n\n[← 目次](../index.md)\n\n[Save](../actions/Save.md)",
+        )?;
+        fs::write(
+            input.join("webblocks/Cart.md"),
+            "# Web ブロック: Cart\n\n## スクリーンアクション\n\n### Clear\n\n画面内処理",
+        )?;
+        fs::write(
+            input.join("actions/Save.md"),
+            "# サーバーアクション: Save\n\n保存処理",
+        )?;
+        fs::write(
+            input.join("rest.md"),
+            "# Orders REST / SOAP 連携\n\n## PublicApi (REST (公開))\n\n### PostOrder\n\n#### 処理フロー\n\nAPIの詳細\n\n## Legacy (SOAP (消費))\n\n### Send\n\nSOAPの詳細",
+        )?;
+        fs::write(
+            input.join("data.md"),
+            "# Orders データ構造\n\n## 構造体 (Structure)\n\n### Request\n\n入力",
+        )?;
+
+        let report = compile_oml_wiki(&input, &wiki)?;
+        assert_eq!(report.modules, 1);
+        assert_eq!(report.elements, 10);
+        let mut hub = Hub::open(&temp.path().join("state"))?;
+        hub.register("oml", "OML", &wiki)?;
+        hub.scan("oml")?;
+        let sources = hub.oml_catalog("oml", "")?;
+        let pages = hub.oml_catalog("oml", &sources[0].path)?;
+        let page = |title: &str| -> Result<&str> {
+            pages
+                .iter()
+                .find(|item| item.title == title)
+                .map(|item| item.path.as_str())
+                .with_context(|| title.to_owned())
+        };
+        let timer = hub.document("oml", page("タイマー · Nightly")?)?;
+        assert!(timer.markdown.contains("Schedule: Daily"));
+        assert!(!timer.markdown.contains("Weekly"));
+        let save = page("サーバーアクション · Save")?;
+        assert!(
+            hub.backlink_details("oml", save, 0, 20)?
+                .items
+                .iter()
+                .any(|hit| hit.path == timer.path && hit.call)
+        );
+        assert!(
+            hub.backlink_details("oml", save, 0, 20)?
+                .items
+                .iter()
+                .any(|hit| hit.title == "画面 · Edit")
+        );
+        assert!(
+            hub.document("oml", page("REST · PublicApi")?)?
+                .markdown
+                .contains("PostOrder")
+        );
+        for title in [
+            "SOAP · Legacy",
+            "タイマー · Weekly",
+            "Webブロック · Cart",
+            "Structure · Request",
+            "サイトプロパティ · 一覧",
+            "セッション変数 · 一覧",
+        ] {
+            page(title)?;
+        }
         Ok(())
     }
 
