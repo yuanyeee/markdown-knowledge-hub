@@ -184,13 +184,30 @@ impl Hub {
         for path in statement.query_map([], |r| r.get::<_, String>(0))? {
             *groups.entry(folder(&path?)).or_default() += 1;
         }
+        let mut statement = db.prepare(
+            "SELECT path, title FROM docs WHERE path GLOB 'oml-*.md' AND instr(path, '/') = 0",
+        )?;
+        let source_titles = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
         let truncated = groups.len() > 200;
         let mut nodes = groups
             .iter()
             .take(200)
-            .map(|(name, count)| SearchHit {
-                path: name.clone(),
-                title: format!("{name} ({count}文書)"),
+            .map(|(name, count)| {
+                let label = if name == "/" {
+                    "ルート"
+                } else {
+                    source_titles
+                        .get(&format!("{name}.md"))
+                        .map_or(name.as_str(), String::as_str)
+                };
+                SearchHit {
+                    path: name.clone(),
+                    title: format!("{label} ({count}文書)"),
+                }
             })
             .collect::<Vec<_>>();
         let selected = nodes.iter().map(|n| n.path.clone()).collect::<HashSet<_>>();

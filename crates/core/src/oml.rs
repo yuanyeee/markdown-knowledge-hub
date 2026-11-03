@@ -487,6 +487,20 @@ mod tests {
         hub.scan("oml")?;
         let sources = hub.oml_catalog("oml", "")?;
         assert_eq!(sources.len(), 1);
+        let folder = sources[0].path.trim_end_matches(".md");
+        let summary = hub.graph_summary("oml")?;
+        assert!(
+            summary
+                .nodes
+                .iter()
+                .any(|node| node.path == folder && node.title == "Orders (3文書)")
+        );
+        assert!(
+            summary
+                .edges
+                .iter()
+                .any(|edge| edge.source == folder || edge.target == folder)
+        );
         let pages = hub.oml_catalog("oml", &sources[0].path)?;
         assert_eq!(pages.len(), 4);
         let screen = pages
