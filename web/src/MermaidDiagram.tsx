@@ -8,13 +8,13 @@ const engine=()=>import('mermaid').then(({default: mermaid})=>{
 let ready:ReturnType<typeof engine>|undefined;
 
 export function MermaidDiagram({source}:{source:string}) {
-  const [image,setImage]=useState('');
+  const [image,setImage]=useState<{url:string;width:number}|null>(null);
   const [error,setError]=useState(false);
   const [zoom,setZoom]=useState(1);
   useEffect(()=>{
     let active=true;
     let url='';
-    setImage('');setError(false);setZoom(1);
+    setImage(null);setError(false);setZoom(1);
     async function render(){
       try{
         if(source.length>30000||/^\s*---/u.test(source)||/%%\s*\{/u.test(source))throw new Error('Unsupported diagram configuration');
@@ -23,7 +23,10 @@ export function MermaidDiagram({source}:{source:string}) {
         const {svg}=await mermaid.render(`wiki-diagram-${++nextDiagram}`,source);
         if(!active)return;
         url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml'}));
-        setImage(url);
+        const root=new DOMParser().parseFromString(svg,'image/svg+xml').documentElement;
+        const [, , width, height]=(root.getAttribute('viewBox')??'').trim().split(/[\s,]+/).map(Number);
+        const initial=width>0&&height>0?Math.min(width,560,360*width/height):420;
+        setImage({url,width:initial});
       }catch{if(active)setError(true);}
     }
     void render();
@@ -31,7 +34,7 @@ export function MermaidDiagram({source}:{source:string}) {
   },[source]);
   return <figure className="mermaid-diagram">
     {image?<><button type="button" onClick={()=>setZoom(z=>z===1?1.75:1)}>{zoom===1?'図を拡大':'元の倍率'}</button>
-      <div className="mermaid-scroll"><img src={image} alt="処理フロー図" style={{width:`${zoom*100}%`}}/></div></>
+      <div className="mermaid-scroll"><img src={image.url} alt="処理フロー図" style={{width:image.width*zoom,maxWidth:zoom===1?'100%':'none'}}/></div></>
       :error?<p role="status">図を表示できません。下の定義または処理表をご確認ください。</p>:<p>図を描画しています…</p>}
     <details><summary>Mermaid定義</summary><pre>{source}</pre></details>
   </figure>;

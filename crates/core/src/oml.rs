@@ -247,7 +247,10 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                     crate::oml_elements::route_fragments(element.body, &anchors, "")
                 );
                 content.push_str("\n<a id=\"oml-call\"></a>\n");
-                if element.kind.contains("アクション") || element.kind == "関数" {
+                if element.kind == "画面"
+                    || element.kind.contains("アクション")
+                    || element.kind == "関数"
+                {
                     let calls = crate::oml_elements::calls(element.body);
                     if !calls.is_empty() {
                         content.push_str("\n## 処理フローの呼び出し先\n\n");
@@ -375,14 +378,14 @@ mod tests {
             source.join("orders.md"),
             "# Orders モジュール仕様書\n\n[保存へ](#store-id)\n\n# 画面: EditOrder\n\n## スクリーンアクション\n\n### Save\n\n画面処理\n\n| # | 種別 | 処理 | 次へ |\n|---|---|---|---|\n| 1 | アクション実行 | Store | → 2 |\n| 2 | 終了 | End | |\n\n<a id=\"store-id\"></a>\n\n# サーバーアクション: Store\n\nサーバー処理\n\n## エンティティ\n\n### Order\n\n注文データ",
         )?;
-        assert_eq!(compile_oml_wiki(&source, &wiki)?.elements, 4);
+        assert_eq!(compile_oml_wiki(&source, &wiki)?.elements, 3);
         let mut hub = Hub::open(&temp.path().join("settings"))?;
         hub.register("oml", "OML", &wiki)?;
         hub.scan("oml")?;
         let sources = hub.oml_catalog("oml", "")?;
         assert_eq!(sources.len(), 1);
         let pages = hub.oml_catalog("oml", &sources[0].path)?;
-        assert_eq!(pages.len(), 5);
+        assert_eq!(pages.len(), 4);
         let screen = pages
             .iter()
             .find(|hit| hit.title == "画面 · EditOrder")
@@ -394,22 +397,18 @@ mod tests {
             .iter()
             .find(|hit| hit.title == "サーバーアクション · Store")
             .context("store page")?;
-        let save = pages
-            .iter()
-            .find(|hit| hit.title == "画面アクション · Save")
-            .context("save page")?;
         let callers = hub.backlink_details("oml", &store.path, 0, 20)?;
         assert!(
             callers
                 .items
                 .iter()
-                .any(|hit| hit.path == save.path && hit.call)
+                .any(|hit| hit.path == screen.path && hit.call)
         );
         assert!(
             hub.graph("oml", Some(&store.path), 20)?
                 .edges
                 .iter()
-                .any(|edge| edge.source == save.path && edge.target == store.path && edge.call)
+                .any(|edge| edge.source == screen.path && edge.target == store.path && edge.call)
         );
         let module = hub.document("oml", &sources[0].path)?;
         assert!(

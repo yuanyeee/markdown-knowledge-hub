@@ -37,3 +37,6 @@ html,body,#root { height:100%; }
   .app.wiki-expanded > .workspace > aside { grid-column:auto; }
   .app.wiki-expanded > .workspace > nav,.app.wiki-expanded > .workspace > aside { max-height:none; }
 }
+.workspace > nav.source-navigation { display:flex; flex-direction:column; overflow:hidden; }
+.source-filter { flex:none; padding-bottom:4px; }
+.source-list { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }

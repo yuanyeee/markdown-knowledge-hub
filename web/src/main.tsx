@@ -45,7 +45,7 @@ function App() {
   const [capabilities,setCapabilities]=useState<{admin:boolean;folder_picker:boolean;desktop?:boolean}>({admin:false,folder_picker:false});
   const [stats,setStats]=useState<{documents:number;links:number;missing:number;missing_heading:number;ambiguous:number;isolated:number;duplicate_names:number}|null>(null);
   const [expanded,setExpanded]=useState(false);
-  const leftPane=useRef<HTMLElement>(null);
+  const leftPane=useRef<HTMLDivElement>(null);
   const centralPane=useRef<HTMLElement>(null);
   const [anchor,setAnchor]=useState('');
   useEffect(()=>{if(anchor&&doc){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
@@ -205,11 +205,12 @@ function App() {
     {error && <p role="alert" className="error">{error}</p>}
     {!projects.length && !error && <p className="empty">「新規プロジェクト」からMarkdownフォルダを登録してください。</p>}
     <div className="workspace" aria-busy={busy}>
-      <nav ref={leftPane} aria-label="文書一覧">
-        {sources.length>0&&<label>元仕様書<select aria-label="元仕様書" value={source} onChange={e=>setSource(e.target.value)}>
+      <nav className="source-navigation" aria-label="文書一覧">
+        {sources.length>0&&<label className="source-filter">元仕様書<select aria-label="元仕様書" value={source} onChange={e=>setSource(e.target.value)}>
           <option value="">すべての仕様書</option>
           {sources.map(item=><option key={item.path} value={item.path}>{item.title}</option>)}
         </select></label>}
+        <div className="source-list" ref={leftPane}>
         {[...groups].map(([kind,items])=><section key={kind}>
           <h2>{kind} <small>{items.length}件</small></h2>
           {items.map(hit=><button disabled={busy} className={`hit ${doc?.path===hit.path?'selected':''}`} key={hit.path} aria-current={doc?.path===hit.path?'page':undefined} onClick={()=>void open(hit.path)}>
@@ -219,6 +220,7 @@ function App() {
         </section>)}
         {!source&&nextHit!==null&&<button disabled={busy} onClick={()=>void more('hits')}>文書をさらに読み込む</button>}
         {project&&!visibleHits.length&&<p>該当する文書がありません。</p>}
+        </div>
       </nav>
       <main ref={centralPane}>
 

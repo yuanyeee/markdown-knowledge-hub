@@ -77,11 +77,7 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
                 if *level != HeadingLevel::H3 {
                     return None;
                 }
-                if section.starts_with("スクリーンアクション")
-                    || section.starts_with("画面アクション")
-                {
-                    Some(("画面アクション", title.as_str()))
-                } else if section.starts_with("エンティティ") {
+                if section.starts_with("エンティティ") {
                     Some(("Entity", title.as_str()))
                 } else if section.starts_with("サーバーアクション") {
                     Some(("サーバーアクション", title.as_str()))
@@ -201,19 +197,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sibling_detail_headings_stay_inside_the_action() {
-        let markdown = "# 画面: Edit\n\n## スクリーンアクション\n\n### Save\n\n### 入力パラメータ (1)\n\nInput\n\n### ローカル変数\n\nLocal\n\n### 処理フロー\n\nFlow\n\n### Cancel\n\nCancel body\n";
+    fn screen_actions_stay_in_the_screen_wiki() {
+        let markdown = "# 画面: Edit\n\n## スクリーンアクション\n\n### Save\n\n### 入力パラメータ\n\nInput\n\n### 処理フロー\n\nFlow\n\n### Cancel\n\nCancel body\n\n# サーバーアクション: Store\n";
         let elements = extract(markdown);
         assert_eq!(
             elements
                 .iter()
                 .map(|element| element.title.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Edit", "Save", "Cancel"]
+            vec!["Edit", "Store"]
         );
-        for heading in ["入力パラメータ", "ローカル変数", "処理フロー"] {
-            assert!(elements[1].body.contains(heading));
+        for heading in ["Save", "入力パラメータ", "処理フロー", "Cancel"] {
+            assert!(elements[0].body.contains(heading));
         }
-        assert!(!elements[1].body.contains("Cancel body"));
     }
 }
