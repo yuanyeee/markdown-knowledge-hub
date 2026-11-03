@@ -192,7 +192,7 @@ function App() {
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{displayMarkdown(doc.markdown)}</Markdown>;
   },[doc,links]);
-  return <div className="app">
+  return <div className={`app ${expanded?'wiki-expanded':''}`}>
     <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
     <section className="toolbar" aria-label="検索条件">
       <label>プロジェクト<select disabled={busy} value={project} onChange={e => setProject(e.target.value)}><option value="" disabled>プロジェクトを選択</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
@@ -201,10 +201,10 @@ function App() {
     <details className="workspace-settings"><summary>プロジェクト管理・監視</summary><ProjectManager current={projects.find(p=>p.id===project)} enabled={capabilities.admin} folderPicker={capabilities.folder_picker} onChanged={refreshProjects} onBusy={setAdminBusy}/>
     {capabilities.desktop&&project&&<WatchManager key={project} project={project} onRefresh={()=>setRevision(v=>v+1)}/>}</details>
     {stats&&<div className="project-stats"><span>文書 <strong>{stats.documents.toLocaleString()}</strong></span><span>リンク <strong>{stats.links.toLocaleString()}</strong></span><span>リンク先なし <strong>{stats.missing.toLocaleString()}</strong></span><span>同名候補あり <strong>{stats.ambiguous.toLocaleString()}</strong></span><span>見出しなし <strong>{stats.missing_heading.toLocaleString()}</strong></span><span title="他の文書との解決済みリンクがない文書">孤立文書 <strong>{stats.isolated.toLocaleString()}</strong></span><span>同名文書群 <strong>{stats.duplicate_names.toLocaleString()}</strong></span></div>}
-    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>(setExpanded(false),setView('graph'))}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}</div>}
+    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}<button className="expand-workspace" type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'閲覧エリアを全画面に拡大'}</button></div>}
     {error && <p role="alert" className="error">{error}</p>}
     {!projects.length && !error && <p className="empty">「新規プロジェクト」からMarkdownフォルダを登録してください。</p>}
-    <div className={`workspace ${expanded?'wiki-expanded':''}`} aria-busy={busy}>
+    <div className="workspace" aria-busy={busy}>
       <nav ref={leftPane} aria-label="文書一覧">
         {sources.length>0&&<label>元仕様書<select aria-label="元仕様書" value={source} onChange={e=>setSource(e.target.value)}>
           <option value="">すべての仕様書</option>
@@ -221,7 +221,7 @@ function App() {
         {project&&!visibleHits.length&&<p>該当する文書がありません。</p>}
       </nav>
       <main ref={centralPane}>
-      {doc&&view==='wiki'&&<div className="wiki-view-actions"><button type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'Wikiを全画面に拡大'}</button></div>}
+
       {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>{wikiBody}</> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
       <aside>
         <h2>参照元</h2>

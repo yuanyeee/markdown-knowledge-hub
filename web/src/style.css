@@ -27,8 +27,13 @@ html,body,#root { height:100%; }
 .mermaid-scroll img { display:block; height:auto; max-width:none; }
 @media(max-width:800px){ .app { height:auto; } .workspace { display:block; } .workspace > nav,.workspace > aside { max-height:45vh; } }
 @media(min-width:801px){ .workspace { grid-template-columns:minmax(145px,20%) minmax(0,1fr) minmax(150px,23%); } .workspace > aside { grid-column:auto; } }
-.workspace.wiki-expanded { position:fixed; inset:0; z-index:20; display:block; border-radius:0; }
-.workspace.wiki-expanded > nav,.workspace.wiki-expanded > aside { display:none; }
-.workspace.wiki-expanded > main { height:100%; }
-.wiki-view-actions { position:sticky; top:0; z-index:2; display:flex; justify-content:flex-end; padding:4px; background:#fff; }
-.wiki-view-actions button { border:1px solid #cad8d1; border-radius:6px; background:#f1f7f3; color:#245f4c; padding:6px 12px; }
+/* Expand the tabs and all three reading panes as one workspace. */
+.app.wiki-expanded { position:fixed; inset:0; z-index:20; max-width:none; height:100dvh; padding:12px; background:#f3f5f8; }
+.app.wiki-expanded > :not(.view-tabs):not(.workspace):not(.error) { display:none; }
+.view-tabs { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.view-tabs .expand-workspace { margin-left:auto; }
+@media(max-width:800px){
+  .app.wiki-expanded > .workspace { display:grid; grid-template-columns:minmax(100px,20%) minmax(0,1fr) minmax(100px,23%); }
+  .app.wiki-expanded > .workspace > aside { grid-column:auto; }
+  .app.wiki-expanded > .workspace > nav,.app.wiki-expanded > .workspace > aside { max-height:none; }
+}
