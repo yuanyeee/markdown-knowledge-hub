@@ -79,6 +79,8 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
                 }
                 if section.starts_with("エンティティ") {
                     Some(("Entity", title.as_str()))
+                } else if section.starts_with("構造体") {
+                    Some(("Structure", title.as_str()))
                 } else if section.starts_with("サーバーアクション") {
                     Some(("サーバーアクション", title.as_str()))
                 } else {
@@ -153,6 +155,49 @@ pub fn calls(markdown: &str) -> std::collections::BTreeSet<String> {
         }
     }
     result
+}
+
+/// Extract declared types from the OML/XIF parameter and attribute tables.
+pub fn declared_types(markdown: &str) -> std::collections::BTreeSet<String> {
+    use pulldown_cmark::Options;
+    let mut column = None;
+    let mut cells = Vec::new();
+    let mut cell = None;
+    let mut types = std::collections::BTreeSet::new();
+    for event in Parser::new_ext(markdown, Options::ENABLE_TABLES) {
+        match event {
+            Event::Start(Tag::Table(_)) => column = None,
+            Event::Start(Tag::TableHead | Tag::TableRow) => cells.clear(),
+            Event::Start(Tag::TableCell) => cell = Some(String::new()),
+            Event::Text(text) | Event::Code(text) => {
+                if let Some(value) = &mut cell {
+                    value.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                cells.push(cell.take().unwrap_or_default().trim().to_owned())
+            }
+            Event::End(TagEnd::TableHead)
+                if cells.iter().any(|value| {
+                    matches!(value.as_str(), "名前" | "属性" | "属性名" | "パラメータ名")
+                }) =>
+            {
+                column = cells
+                    .iter()
+                    .position(|value| matches!(value.as_str(), "型" | "データ型"));
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(value) = column.and_then(|index| cells.get(index)) {
+                    let name = value.strip_prefix("List of ").unwrap_or(value).trim();
+                    if !name.is_empty() {
+                        types.insert(name.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    types
 }
 
 pub fn route_fragments(

@@ -11,11 +11,13 @@ struct Spec {
     name: String,
     path: PathBuf,
     source: String,
+    supplemental: bool,
     references: Vec<(String, usize, bool)>,
 }
 
 fn parse(path: PathBuf, source: String) -> Option<Spec> {
     let mut name = None;
+    let mut supplemental = false;
     let mut section = String::new();
 
     let mut line_text = String::new();
@@ -36,8 +38,10 @@ fn parse(path: PathBuf, source: String) -> Option<Spec> {
             Event::End(TagEnd::Heading(level)) => {
                 if level == HeadingLevel::H1 && name.is_none() {
                     let title = line_text.trim();
+                    supplemental = title.ends_with(" データ構造");
                     name = title
                         .strip_suffix(" モジュール仕様書")
+                        .or_else(|| title.strip_suffix(" データ構造"))
                         .or_else(|| title.strip_prefix("Extension 仕様書: "))
                         .map(str::to_owned);
                 }
@@ -84,6 +88,7 @@ fn parse(path: PathBuf, source: String) -> Option<Spec> {
         name,
         path,
         source,
+        supplemental,
         references,
     })
 }
@@ -153,7 +158,9 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
 
     let mut by_name = BTreeMap::<&str, Vec<usize>>::new();
     for (id, spec) in specs.iter().enumerate() {
-        by_name.entry(&spec.name).or_default().push(id);
+        if !spec.supplemental {
+            by_name.entry(&spec.name).or_default().push(id);
+        }
     }
     let page = |id: usize| {
         format!(
@@ -203,9 +210,16 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
         .iter()
         .map(|spec| crate::oml_elements::extract(&spec.source))
         .collect();
+    let mut types = BTreeMap::<(&str, &str), Vec<(usize, usize)>>::new();
     let mut actions = BTreeMap::<(usize, &str), Vec<usize>>::new();
     for (id, elements) in extracted.iter().enumerate() {
         for (number, element) in elements.iter().enumerate() {
+            if matches!(element.kind, "Structure" | "Entity") {
+                types
+                    .entry((&specs[id].name, &element.title))
+                    .or_default()
+                    .push((id, number + 1));
+            }
             if element.kind.contains("アクション") || element.kind == "関数" {
                 actions
                     .entry((id, &element.title))
@@ -285,6 +299,35 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                             content.push_str(&format!("- 未解決　{}\n", literal(&call)));
                         }
                     }
+                }
+                let mut type_links = String::new();
+                for name in crate::oml_elements::declared_types(element.body) {
+                    let (module, target) = name.rsplit_once('.').unwrap_or((&spec.name, &name));
+                    if let Some([(target_id, target_number)]) =
+                        types.get(&(module, target)).map(Vec::as_slice)
+                        && (*target_id != id || *target_number != number + 1)
+                    {
+                        let target_page = page(*target_id);
+                        let target_folder = target_page.trim_end_matches(".md");
+                        type_links.push_str(&format!(
+                            "- [{}](../{target_folder}/{target_number}.md)\n",
+                            literal(&name)
+                        ));
+                    } else if name.contains('.') {
+                        type_links.push_str(&format!("- 未解決　{}\n", literal(&name)));
+                    }
+                }
+                if !type_links.is_empty() {
+                    content.push_str("\n## 使用するデータ型\n\n");
+                    content.push_str(&type_links);
+                }
+                if element.kind == "Structure"
+                    && !element
+                        .body
+                        .lines()
+                        .any(|line| line.trim_start().starts_with("| 公開"))
+                {
+                    content.push_str("\n公開範囲：仕様書に記載なし\n");
                 }
                 fs::write(destination.join(relative), content)?;
                 report.elements += 1;
@@ -367,6 +410,47 @@ impl crate::Hub {
 mod tests {
     use super::*;
     use crate::Hub;
+
+    #[test]
+    fn connects_oml_parameter_to_xif_structure_and_indexes_split_oml_data() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let wiki = temp.path().join("wiki");
+        fs::create_dir(&input)?;
+        fs::write(
+            input.join("Orders.md"),
+            "# Orders モジュール仕様書\n\n# サーバーアクション: Save\n\n## 出力パラメータ\n\n| 名前 | 型 |\n|---|---|\n| Response | List of Shared.Result |\n",
+        )?;
+        fs::write(
+            input.join("Shared.md"),
+            "# Extension 仕様書: Shared\n\n## 構造体 (1)\n\n### Result\n\n結果の属性",
+        )?;
+        fs::write(
+            input.join("data.md"),
+            "# Orders データ構造\n\n## 構造体 (Structure)\n\n### OrderInput\n\n| 項目 | 値 |\n|---|---|\n| 公開 | Yes |",
+        )?;
+        assert_eq!(compile_oml_wiki(&input, &wiki)?.elements, 3);
+        let mut hub = Hub::open(&temp.path().join("settings"))?;
+        hub.register("demo", "Demo", &wiki)?;
+        hub.scan("demo")?;
+        let result = hub
+            .search("demo", "Result")?
+            .into_iter()
+            .find(|hit| hit.title == "Structure · Result")
+            .context("XIF structure not indexed")?;
+        assert!(
+            hub.backlink_details("demo", &result.path, 0, 20)?
+                .items
+                .iter()
+                .any(|hit| hit.title == "サーバーアクション · Save")
+        );
+        assert!(
+            hub.search("demo", "OrderInput")?
+                .iter()
+                .any(|hit| hit.title == "Structure · OrderInput")
+        );
+        Ok(())
+    }
 
     #[test]
     fn elements_are_grouped_by_source_and_backlinks_have_titles() -> Result<()> {
