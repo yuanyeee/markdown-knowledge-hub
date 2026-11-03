@@ -215,6 +215,24 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
     Ok(report)
 }
 
+impl crate::Hub {
+    /// Prepare a separate Markdown input for the normal project registration flow.
+    pub fn prepare_oml_wiki(&self, id: &str, input: &Path, parent: &Path) -> Result<PathBuf> {
+        Self::validate_id(id)?;
+        let parent = parent.canonicalize()?;
+        let destination = parent.join(format!("OML-Wiki-{id}-{}", uuid::Uuid::new_v4()));
+        self.validate_input(&destination)?;
+        for project in self.projects()? {
+            ensure!(
+                !crate::outputs::overlaps(Path::new(&project.root), &destination),
+                "既存プロジェクトの入力領域には生成できません"
+            );
+        }
+        compile_oml_wiki(input, &destination)?;
+        Ok(destination)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

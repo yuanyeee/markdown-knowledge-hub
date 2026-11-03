@@ -10,6 +10,7 @@ license = "UNLICENSED"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tempfile = "3"
 tauri = { version = "2", features = [] }
 hub-core = { path = "../../crates/core" }
 hub-service = { path = "../../crates/service" }

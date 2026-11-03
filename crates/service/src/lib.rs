@@ -67,15 +67,19 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
         )?,
         "admin/create" => {
             let id = text(args, "id")?;
-            if let Some(output) = args.get("output").and_then(Value::as_str) {
-                hub.register_with_output(
-                    id,
-                    text(args, "name")?,
-                    Path::new(text(args, "root")?),
-                    Path::new(output),
-                )?;
+            let original = Path::new(text(args, "root")?);
+            let output = args.get("output").and_then(Value::as_str).map(Path::new);
+            let generated = if args.get("oml").and_then(Value::as_bool) == Some(true) {
+                let parent = output.context("出力の親フォルダーを選択してください")?;
+                Some(hub.prepare_oml_wiki(id, original, parent)?)
             } else {
-                hub.register(id, text(args, "name")?, Path::new(text(args, "root")?))?;
+                None
+            };
+            let root = generated.as_deref().unwrap_or(original);
+            if let Some(output) = output {
+                hub.register_with_output(id, text(args, "name")?, root, output)?;
+            } else {
+                hub.register(id, text(args, "name")?, root)?;
             }
             match hub.scan(id) {
                 Ok(report) => json!({"id":id,"report":report}),
@@ -115,6 +119,35 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn oml_creation_registers_the_generated_wiki() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let originals = temp.path().join("originals");
+        let output = temp.path().join("output");
+        std::fs::create_dir(&originals)?;
+        std::fs::create_dir(&output)?;
+        let source = "# Orders モジュール仕様書";
+        std::fs::write(originals.join("orders.md"), source)?;
+        let mut hub = Hub::open(&temp.path().join("settings"))?;
+        call(
+            &mut hub,
+            "admin/create",
+            &json!({
+                "id": "oml", "name": "OML Wiki", "root": originals, "output": output, "oml": true
+            }),
+        )?;
+        assert!(
+            hub.search("oml", "Orders")?
+                .iter()
+                .any(|hit| hit.title == "Orders")
+        );
+        assert_eq!(
+            std::fs::read_to_string(originals.join("orders.md"))?,
+            source
+        );
+        Ok(())
+    }
+
     #[test]
     fn external_output_lifecycle_keeps_cached_documents_without_source() {
         let source = tempfile::tempdir().unwrap();

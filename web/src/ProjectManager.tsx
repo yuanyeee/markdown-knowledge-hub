@@ -1,3 +1,4 @@
+import { isTauri } from '@tauri-apps/api/core';
 import { useEffect, useState } from 'react';
 import { read, write as sendCommand } from './transport';
 import { ConfirmRemove } from './ConfirmRemove';
@@ -6,6 +7,9 @@ export type Project={id:string;name:string;root:string;output:string;legacy_outp
 type Retired={key:string;project:string;path:string};
 type Props={current?:Project;enabled:boolean;folderPicker:boolean;onChanged:(preferred?:string)=>Promise<void>;onBusy:(busy:boolean)=>void};
 export function ProjectManager({current,enabled,folderPicker,onChanged,onBusy}:Props) {
+  const [kind,setKind]=useState<'markdown'|'oml'|'files'>('markdown');
+  const [omlFiles,setOmlFiles]=useState<string[]>([]);
+  const oml=kind!=='markdown';
   const [mode,setMode]=useState<'create'|'open'|null>(null);
   const [id,setId]=useState('');
   const [removeTarget,setRemoveTarget]=useState<Project|null>(null);
@@ -43,21 +47,35 @@ export function ProjectManager({current,enabled,folderPicker,onChanged,onBusy}:P
   if(!enabled)return <p className="admin-hint">閲覧モードです。プロジェクトの追加・更新は管理者が行います。</p>;
   return <section className="manager" aria-label="プロジェクト管理">
     <div className="manager-actions">
-      <button disabled={pending} onClick={()=>{if(mode==='create'){setMode(null);return;}setMode('create');setId(`project-${crypto.randomUUID()}`);setName('');setRoot('');setOutput(lastOutput);setError('');setMessage('');setWarning('');}}>新規プロジェクト</button>
+      <button disabled={pending} onClick={()=>{if(mode==='create'){setMode(null);return;}setMode('create');setKind('markdown');setOmlFiles([]);setId(`project-${crypto.randomUUID()}`);setName('');setRoot('');setOutput(lastOutput);setError('');setMessage('');setWarning('');}}>新規プロジェクト</button>
       <button disabled={pending} onClick={()=>{setMode(mode==='open'?null:'open');setError('');}}>既存プロジェクトを開く</button>
       <button disabled={!current||pending||mode!==null} onClick={()=>void perform(async()=>{await command('rebuild',{project:current!.id});await onChanged(current!.id);setMessage('Wiki・検索索引・リンク関係を再作成しました。');},'入力を読み直して再作成しています…')}>再作成</button>
       <button className="danger" disabled={!current||pending||mode!==null} onClick={()=>{if(current)setRemoveTarget(current);}}>プロジェクトを削除</button>
     </div>
-    {mode==='create'&&<form className="project-form" onSubmit={e=>{e.preventDefault();void perform(async()=>{await command('create',{id,name,root,output});await onChanged(id);setMode(null);setName('');setRoot('');setMessage('指定した出力先にWiki・検索索引・リンク関係を作成しました。');},'Markdownを解析してWikiとリンク関係を作成しています…');}}>
+    {mode==='create'&&<form className="project-form" onSubmit={e=>{e.preventDefault();void perform(async()=>{await command('create',{id,name,root,output,oml,...(kind==='files'?{oml_files:omlFiles}:{})});await onChanged(id);setMode(null);setName('');setRoot('');setMessage('指定した出力先にWiki・検索索引・リンク関係を作成しました。');},'Markdownを解析してWikiとリンク関係を作成しています…');}}>
       <h2>新規プロジェクト</h2>{current&&<p className="creation-context">現在は「{current.name}」を閲覧中です。以下は別のプロジェクトの新規登録です。作成が完了すると新しいWikiへ切り替わり、キャンセルすると現在の閲覧を続けます。</p>}<label>プロジェクト名<input required maxLength={100} value={name} disabled={pending} onChange={e=>setName(e.target.value)} placeholder="例：販売システム"/></label>
-      {folder('入力フォルダー',root,setRoot,'D:\\Specifications\\SystemA')}
+      <label><select aria-label="プロジェクトの種類" value={kind} disabled={pending} onChange={e=>{setKind(e.target.value as typeof kind);setRoot('');setOmlFiles([]);}}><option value="markdown">通常のMarkdown</option><option value="oml">OML仕様書からWikiを生成</option>{isTauri()&&<option value="files">OMLファイルを選んでWikiを生成</option>}</select></label>
+      {kind==='oml'&&<p className="hint">OML Utilitiesで出力したMarkdownのフォルダーを選びます。生成したWikiは出力の親フォルダー内に別フォルダーとして保存します。</p>}
+      {kind==='files'?<>
+        <button type="button" disabled={pending} onClick={()=>void perform(async()=>{
+          const result=await command('pick-oml-files');
+          if(Array.isArray(result.paths))setOmlFiles(result.paths as string[]);
+          setMessage('');
+        },'OMLファイルを選択しています…')}>OMLファイルを選択（複数可）</button>
+        <p>{omlFiles.length}件選択</p>
+        <ul>{omlFiles.map(path=><li key={path}>{path.split(/[\\/]/).pop()}</li>)}</ul>
+        <p className="hint">CtrlまたはShiftを押しながら複数選べます。解析に使うOML Utilitiesのoml.exeはアプリと同じフォルダーに置いてください。</p>
+      </>:<>
+      {folder(oml?'OML仕様書フォルダー':'入力フォルダー',root,setRoot,'D:\\Specifications\\SystemA')}
       <p className="hint">お客様のMarkdownがある場所です。配下の.mdを読み取り、原本は変更しません。</p>
+      </>}
+
       {folder('出力の親フォルダー',output,setOutput,'D:\\MarkdownHubOutputs')}
       {lastOutput&&output===lastOutput&&<p className="hint">前回選択した親フォルダーを候補として入力しています。今回の保存場所に変更できます。</p>}
       <p className="hint">親フォルダーを選ぶと、その中に今回専用の保存先を自動作成します。既存プロジェクトのproject.jsonがあるフォルダーは選びません。</p>
       <div className="output-preview"><strong>今回、新しく作成する保存先</strong><output aria-label="新規プロジェクトの生成データ保存先">{output.trim()?managedPath(output,id):'出力の親フォルダーを選択してください'}</output></div>
       <p className="hint">出力には閲覧用の本文コピー・検索索引・リンク情報が含まれます。専用の子フォルダーを作り、親フォルダーの既存ファイルは変更しません。</p>
-      <button disabled={pending||!name.trim()||!root.trim()||!output.trim()} type="submit">作成してWikiを開く</button><button disabled={pending} type="button" onClick={()=>setMode(null)}>キャンセル</button>
+      <button disabled={pending||!name.trim()||(kind==='files'?!omlFiles.length:!root.trim())||!output.trim()} type="submit">作成してWikiを開く</button><button disabled={pending} type="button" onClick={()=>setMode(null)}>キャンセル</button>
     </form>}
     {mode==='open'&&<form className="project-form" onSubmit={e=>{e.preventDefault();void perform(async()=>{const result=await command('open-output',{output:existing});await onChanged(String(result.id));setMode(null);setMessage('保存済みの生成データからプロジェクトを開きました。');},'出力フォルダーを確認しています…');}}>
       <h2>既存プロジェクトを開く</h2>{folder('既存プロジェクトの保存先（project.jsonがある場所）',existing,setExisting,'D:\\MarkdownHubOutputs\\MarkdownKnowledgeHub\\project-…')}
