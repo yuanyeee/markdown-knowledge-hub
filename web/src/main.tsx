@@ -151,6 +151,12 @@ function App() {
     }).catch(e=>{if(active)setError(String(e));});
     return ()=>{active=false;};
   },[project,source,revision]);
+  const sourceTitles=useMemo(()=>new Map(sources.map(item=>[item.path,item.title])),[sources]);
+  function referenceTitle(path:string,title:string){
+    const slash=path.indexOf('/');
+    const original=slash<0?undefined:sourceTitles.get(path.slice(0,slash)+'.md');
+    return original?`（${original}）${title}`:title;
+  }
   function syncSource(path:string){
     const folder=path.split('/')[0];
     const match=sources.find(item=>item.path===path||item.path===folder+'.md');
@@ -228,14 +234,14 @@ function App() {
       <aside>
         <h2>参照元</h2>
         {backlinks.map(item=><button className="hit" key={item.path} disabled={busy} onClick={()=>void open(item.path)}>
-          <strong>{item.title}</strong><span>{item.call?'呼び出し元':'文書参照'} · {item.path}</span>
+          <strong>{referenceTitle(item.path,item.title)}</strong><span>{item.call?'呼び出し元':'文書参照'} · {item.path}</span>
         </button>)}
         {nextBack!==null&&<button disabled={busy} onClick={()=>void more('backlinks')}>参照元をさらに読み込む</button>}
         {!backlinks.length&&<p>参照元はありません。</p>}
         <h2>参照先</h2>
         {outgoing.filter(link=>link.resolved!==doc?.path).map((link,index)=><div className="link" key={index}>
           {link.resolved?<button className="hit" disabled={busy} onClick={()=>void open(link.resolved!,link.target.split('#').slice(1).join('#'))}>
-            <strong>{link.resolved_title??link.target}</strong><span>{link.target.endsWith('#oml-call')?'呼び出し先':'文書参照'}</span>
+            <strong>{referenceTitle(link.resolved,link.resolved_title??link.target)}</strong><span>{link.target.endsWith('#oml-call')?'呼び出し先':'文書参照'}</span>
           </button>:<span>{link.target}<small> {link.status==='ambiguous'?'同名候補あり':link.status==='missing-heading'?'見出しなし':'リンク先なし'}</small></span>}
         </div>)}
         {nextLinkOffset!==null&&<button disabled={busy} onClick={()=>void moreLinks()}>参照先をさらに読み込む</button>}
