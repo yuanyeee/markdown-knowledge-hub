@@ -29,6 +29,21 @@ fn detail_heading(title: &str) -> bool {
     )
 }
 
+fn without_count(title: &str) -> &str {
+    for (open, close) in [('(', ')'), ('（', '）')] {
+        if let Some((name, count)) = title
+            .strip_suffix(close)
+            .and_then(|text| text.rsplit_once(open))
+        {
+            let count = count.trim();
+            if !count.is_empty() && count.chars().all(|character| character.is_ascii_digit()) {
+                return name.trim_end();
+            }
+        }
+    }
+    title
+}
+
 pub fn extract(source: &str) -> Vec<Element<'_>> {
     let mut headings = Vec::new();
     let mut heading = None;
@@ -95,7 +110,7 @@ pub fn extract(source: &str) -> Vec<Element<'_>> {
                         });
                 }
                 if *level == HeadingLevel::H2 {
-                    return match title.as_str() {
+                    return match without_count(title) {
                         "サイトプロパティ" => Some(("サイトプロパティ", "一覧")),
                         "セッション変数" => Some(("セッション変数", "一覧")),
                         _ => None,

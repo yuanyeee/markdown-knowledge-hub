@@ -589,7 +589,7 @@ mod tests {
         }
         fs::write(
             input.join("index.md"),
-            "# Orders モジュール仕様書\n\n[画面](screens/Edit.md) / [連携](rest.md)\n\n## サイトプロパティ\n\n| 名前 | 型 |\n|---|---|\n| Enabled | Boolean |\n\n## セッション変数\n\n| 名前 | 型 |\n|---|---|\n| Cart | Text |\n\n## その他のモジュール定義\n\n### タイマー\n\n| 名前 | 説明 | 詳細 |\n|---|---|---|\n| Nightly | 日次処理 | Action: Save<br>Schedule: Daily |\n| Weekly | 週次処理 | Action: Save |\n\n### ロール\n\n| 名前 | 説明 | 詳細 |\n|---|---|---|\n| Admin | 管理者 | |\n",
+            "# Orders モジュール仕様書\n\n[画面](screens/Edit.md) / [連携](rest.md)\n\n## サイトプロパティ(2)\n\n| 名前 | 型 |\n|---|---|\n| Enabled | Boolean |\n\n## セッション変数 （3）\n\n| 名前 | 型 |\n|---|---|\n| Cart | Text |\n\n## その他のモジュール定義\n\n### タイマー\n\n| 名前 | 説明 | 詳細 |\n|---|---|---|\n| Nightly | 日次処理 | Action: Save<br>Schedule: Daily |\n| Weekly | 週次処理 | Action: Save |\n\n### ロール\n\n| 名前 | 説明 | 詳細 |\n|---|---|---|\n| Admin | 管理者 | |\n",
         )?;
         fs::write(
             input.join("screens/Edit.md"),
