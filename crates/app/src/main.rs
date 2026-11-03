@@ -253,6 +253,8 @@ struct LinkParameters {
     #[serde(default)]
     path: String,
     #[serde(default)]
+    fragment: String,
+    #[serde(default)]
     q: String,
     #[serde(default)]
     source: String,
@@ -353,7 +355,7 @@ async fn wiki_view(State(data): State<PathBuf>, Query(p): Query<LinkParameters>)
             &mut hub,
             "wiki-view",
             &serde_json::json!({
-                "project": p.project, "path": p.path
+                "project": p.project, "path": p.path, "fragment": p.fragment
             }),
         )
     })

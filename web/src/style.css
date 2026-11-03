@@ -65,3 +65,7 @@ html,body,#root { height:100%; }
 .app.graph-expanded .link-graph h2,.app.graph-expanded .link-graph p { margin:5px 0; }
 .app.graph-expanded .graph-canvas { flex:1; min-height:180px; height:auto; }
 .app.graph-expanded .link-graph details { max-height:20vh; overflow:auto; }
+.chapter-reader { margin:8px 0 16px; padding:12px; border:1px solid #dfe5eb; border-radius:8px; background:#f8fafb; }
+.chapter-reader h2 { margin:0 0 8px; font-size:18px; }
+.chapter-reader select { max-width:100%; }
+.chapter-actions { display:flex; gap:8px; margin-top:8px; }

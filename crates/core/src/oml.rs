@@ -254,8 +254,27 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                 let title = format!("{} · {}", element.kind, literal(&element.title));
                 let relative = format!("{folder}/{}.md", number + 1);
                 body.push_str(&format!("- [{title}]({relative})\n"));
+                let fragment = element
+                    .anchors
+                    .iter()
+                    .rev()
+                    .find(|anchor| {
+                        anchors
+                            .get(*anchor)
+                            .is_some_and(|matches| matches.len() == 1)
+                    })
+                    .map(|anchor| {
+                        format!(
+                            "#{}",
+                            percent_encoding::utf8_percent_encode(
+                                anchor,
+                                percent_encoding::NON_ALPHANUMERIC
+                            )
+                        )
+                    })
+                    .unwrap_or_default();
                 let mut content = format!(
-                    "# {title}\n\n[元仕様書ページ](../{module_page}) · {} {} 行\n\n{}",
+                    "# {title}\n\n[元仕様書ページ](../{module_page}{fragment}) · {} {} 行\n\n{}",
                     literal(&spec.path.to_string_lossy()),
                     element.line,
                     crate::oml_elements::route_fragments(element.body, &anchors, "")

@@ -41,7 +41,7 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             let project = text(args, "project")?;
             let path = text(args, "path")?;
             json!({
-                "document": hub.document(project, path)?,
+                "document": hub.reading_document(project, path, args.get("fragment").and_then(Value::as_str).unwrap_or(""))?,
                 "backlinks": hub.backlink_details(project, path, 0, 100)?,
                 "links": hub.links_page(project, path, 0, 100)?,
             })

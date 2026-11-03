@@ -58,10 +58,25 @@ function DiagramDialog({image,onClose}:{image:Diagram;onClose:()=>void}) {
 }
 
 export function MermaidDiagram({source}:{source:string}) {
+  const figure=useRef<HTMLElement>(null);
+  const [visible,setVisible]=useState(false);
+  useEffect(()=>{
+    const element=figure.current;
+    if(!element)return;
+    const observer=new IntersectionObserver(entries=>{
+      if(entries.some(entry=>entry.isIntersecting)){
+        setVisible(true);
+        observer.disconnect();
+      }
+    },{rootMargin:'100px'});
+    observer.observe(element);
+    return ()=>observer.disconnect();
+  },[]);
   const [image,setImage]=useState<Diagram|null>(null);
   const [error,setError]=useState(false);
   const [full,setFull]=useState(false);
   useEffect(()=>{
+    if(!visible)return;
     let active=true;
     let url='';
     setImage(null);setError(false);setFull(false);
@@ -81,11 +96,11 @@ export function MermaidDiagram({source}:{source:string}) {
     }
     void render();
     return()=>{active=false;if(url)URL.revokeObjectURL(url);};
-  },[source]);
-  return <figure className="mermaid-diagram">
+  },[source,visible]);
+  return <figure className="mermaid-diagram" ref={figure}>
     {image?<><DiagramViewport key={image.url} image={image} full={false} onToggle={()=>setFull(true)}/>
       {full&&<DiagramDialog image={image} onClose={()=>setFull(false)}/>}</>
-      :error?<p role="status">図を表示できません。下の定義または処理表をご確認ください。</p>:<p>図を描画しています…</p>}
+      :error?<p role="status">図を表示できません。下の定義または処理表をご確認ください。</p>:<p>{visible?'図を描画しています…':'表示位置に近づくと処理フロー図を描画します。'}</p>}
     <details><summary>Mermaid定義</summary><pre>{source}</pre></details>
   </figure>;
 }

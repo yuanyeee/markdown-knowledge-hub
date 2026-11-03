@@ -14,7 +14,8 @@ const GraphView=lazy(()=>import('./GraphView').then(module=>({default:module.Gra
 
 type Hit = { path: string; title: string };
 type Backlink = Hit & {call:boolean};
-type Doc = Hit & { markdown: string };
+type Chapter = {title:string;start:number};
+type Doc = Hit & { markdown: string; chapters?:Chapter[]|null; chapter?:number|null };
 type Link = { source: string; target: string; resolved: string | null; status: string; resolved_title?:string|null };
 type Page<T> = {items:T[];next_offset:number|null};
 type LinkPage = { items: Link[]; next_offset: number | null };
@@ -52,8 +53,8 @@ function App() {
   const leftPane=useRef<HTMLDivElement>(null);
   const centralPane=useRef<HTMLElement>(null);
   const [anchor,setAnchor]=useState('');
-  useEffect(()=>{if(anchor&&doc){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
-  useEffect(()=>{if(!anchor)centralPane.current?.scrollTo(0,0);},[doc?.path,anchor]);
+  useEffect(()=>{if(anchor&&doc&&!doc.chapters){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
+  useEffect(()=>{if(!anchor||doc?.chapters)centralPane.current?.scrollTo(0,0);},[doc,anchor]);
   useEffect(()=>{
     if(!expanded&&!graphExpanded)return;
     const exit=(event:KeyboardEvent)=>{
@@ -142,7 +143,7 @@ function App() {
     const before=capture();
     const nextSource=sourceFor(path);
     const after:HistoryEntry={...before,source:nextSource,path,anchor:fragment,scroll:0,view:'wiki'};
-    if(path===doc?.path){
+    if(path===doc?.path&&!doc.chapters){
       if(fragment!==anchor||view!=='wiki')record(before,after);
       setView('wiki');setAnchor(fragment);setSource(nextSource);
       if(!fragment)centralPane.current?.scrollTo(0,0);
@@ -151,7 +152,7 @@ function App() {
     const current=++generation.current;
     setError('');setBusy(true);
     try{
-      const wiki=await api<WikiView>('wiki-view',project,{path});
+      const wiki=await api<WikiView>('wiki-view',project,{path,fragment});
       if(current!==generation.current)return;
       applyWiki(wiki);setSource(nextSource);setAnchor(fragment);setView('wiki');
       record(before,after);
@@ -168,7 +169,7 @@ function App() {
     try{
       const [found,wiki]=await Promise.all([
         entry.query===searched&&entry.searchSource===searchedSource?null:api<Page<Hit>>('search-page',project,{q:entry.query,source:entry.searchSource,limit:'50'}),
-        entry.path?api<WikiView>('wiki-view',project,{path:entry.path}):null,
+        entry.path?api<WikiView>('wiki-view',project,{path:entry.path,fragment:entry.anchor}):null,
       ]);
       if(current!==generation.current)return;
       if(found){setHits(found.items);setNextHit(found.next_offset);}
@@ -257,7 +258,7 @@ function App() {
   const wikiNavigation=useRef({open,navigate});
   wikiNavigation.current={open,navigate};
   const wikiBody=useMemo(()=>{
-    if(!doc)return null;
+    if(!doc||doc.chapters&&doc.chapter==null)return null;
     const outgoing=links.filter(link=>link.source===doc.path);
     return <Markdown skipHtml remarkPlugins={[remarkGfm,remarkWiki,remarkFlowTables]} rehypePlugins={[rehypeHeadingIds]} components={{
         pre: WikiPre,
@@ -302,7 +303,7 @@ function App() {
     {!projects.length && !error && <p className="empty">「新規プロジェクト」からMarkdownフォルダを登録してください。</p>}
     <div className="workspace" aria-busy={busy}>
       <nav className="source-navigation" aria-label="文書一覧">
-        {sources.length>0&&<label className="source-filter">元仕様書<select aria-label="元仕様書" value={source} onChange={e=>setSource(e.target.value)}>
+        {sources.length>0&&<label className="source-filter">元仕様書<select aria-label="元仕様書" value={source} disabled={busy} onChange={e=>{const path=e.target.value;if(path)void open(path);else setSource('');}}>
           <option value="">すべての仕様書</option>
           {sources.map(item=><option key={item.path} value={item.path}>{item.title}</option>)}
         </select></label>}
@@ -324,7 +325,24 @@ function App() {
       </nav>
       <main ref={centralPane}>
 
-      {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} expanded={graphExpanded} onToggleExpand={()=>setGraphExpanded(value=>!value)} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>{wikiBody}</> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
+      {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} expanded={graphExpanded} onToggleExpand={()=>setGraphExpanded(value=>!value)} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>
+        {doc.chapters&&<section className="chapter-reader" aria-label="元仕様書の章">
+          <h2>{doc.title} の目次</h2>
+          <label>章を選択 <select aria-label="章を選択" disabled={busy} value={doc.chapter==null?'':String(doc.chapter)}
+            onChange={event=>{
+              const value=event.target.value;
+              const chapter=value===''?undefined:doc.chapters?.[Number(value)];
+              void open(doc.path,chapter?`chapter:${chapter.start}`:'');
+            }}>
+            <option value="">目次のみ</option>
+            {doc.chapters.map((chapter,index)=><option key={chapter.start} value={index}>{chapter.title}</option>)}
+          </select></label>
+          {doc.chapter==null?<p className="hint">章を選ぶと、その部分の本文を表示します。</p>:<div className="chapter-actions">
+            <button type="button" disabled={busy||doc.chapter===0} onClick={()=>void open(doc.path,`chapter:${doc.chapters![doc.chapter!-1].start}`)}>前の章</button>
+            <button type="button" disabled={busy||doc.chapter===doc.chapters.length-1} onClick={()=>void open(doc.path,`chapter:${doc.chapters![doc.chapter!+1].start}`)}>次の章</button>
+          </div>}
+        </section>}
+        {wikiBody}</> : <div className="empty"><span className="symbol">↔</span><h2>知識のつながりを見つける</h2><p>文書を選ぶと、本文と参照元を表示します。</p></div>}</main>
       <aside>
         <h2>参照元</h2>
         {backlinks.map(item=><button className="hit" key={item.path} disabled={busy} onClick={()=>void open(item.path)}>
