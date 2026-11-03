@@ -40,3 +40,12 @@ html,body,#root { height:100%; }
 .workspace > nav.source-navigation { display:flex; flex-direction:column; overflow:hidden; }
 .source-filter { flex:none; padding-bottom:4px; }
 .source-list { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.mermaid-toolbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.mermaid-toolbar button { border:1px solid #cad8d1; border-radius:6px; padding:5px 10px; background:#f1f7f3; color:#245f4c; }
+.mermaid-toolbar output { min-width:4ch; text-align:center; }
+.mermaid-scroll { max-height:none; overscroll-behavior:contain; padding:8px; border:1px solid #dfe5eb; border-radius:6px; background:#fff; }
+.mermaid-scroll img { margin-inline:auto; max-width:none; }
+.mermaid-fullscreen { width:calc(100vw - 24px); height:calc(100dvh - 24px); max-width:none; max-height:none; padding:16px; border:1px solid #cad8d1; border-radius:10px; }
+.mermaid-fullscreen::backdrop { background:#172a36b0; }
+.mermaid-fullscreen .mermaid-viewer { display:flex; flex-direction:column; height:100%; }
+.mermaid-fullscreen .mermaid-scroll { flex:1; min-height:0; }
