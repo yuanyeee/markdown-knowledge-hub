@@ -25,6 +25,7 @@ const WikiPre: NonNullable<Components['pre']> = ({children,node: _node,...props}
   }
   return <pre {...props}>{children}</pre>;
 };
+type HistoryEntry = { query:string; source:string; path:string; anchor:string; scroll:number; view:'wiki'|'graph' };
 type WikiView = {document:Doc;backlinks:Page<Backlink>;links:LinkPage};
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -59,6 +60,14 @@ function App() {
   const [view,setView]=useState<'wiki'|'graph'>('wiki');
   const [revision,setRevision]=useState(0);
   const generation = useRef(0);
+  const [history,setHistory]=useState<{entries:HistoryEntry[];position:number}>({entries:[],position:-1});
+  const pendingScroll=useRef<number|null>(null);
+  useEffect(()=>{
+    if(pendingScroll.current===null)return;
+    centralPane.current?.scrollTo(0,pendingScroll.current);
+    pendingScroll.current=null;
+  },[history.position,doc,view]);
+
   useEffect(() => { api<Project[]>('projects').then(p => { setProjects(p); setProject(p[0]?.id || ''); }).catch(e => setError(String(e))); }, []);
   useEffect(()=>{api<typeof capabilities>('capabilities').then(setCapabilities).catch(e=>setError(String(e)));},[]);
   async function refreshProjects(preferred?:string) {
@@ -69,6 +78,7 @@ function App() {
   useEffect(() => {
     generation.current++;
     let active = true;
+    setHistory({entries:[],position:-1}); pendingScroll.current=null;
     setDoc(null); setExpanded(false); setAnchor(''); setBacklinks([]); setLinks([]); setNextLinkOffset(null); setNextHit(null);setNextBack(null);setHits([]); setQ(''); setError('');setStats(null);setView('wiki');
     if (project) {
       setBusy(true);
@@ -85,28 +95,82 @@ function App() {
     }
     return () => { active = false; };
   }, [project,revision]);
-  async function search() {
-    const current = ++generation.current;
-    setError(''); setBusy(true);
-    try { const found = await api<Page<Hit>>('search-page', project, { q,limit:'50' }); if (current === generation.current) {setHits(found.items);setNextHit(found.next_offset);setSearched(q);} }
-    catch (e) { if (current === generation.current) setError(String(e)); }
-    finally { if (current === generation.current) setBusy(false); }
+  function capture():HistoryEntry {
+    return {query:searched,source,path:doc?.path??'',anchor,scroll:centralPane.current?.scrollTop??0,view};
   }
-  async function open(path: string, fragment='') {
+  function record(before:HistoryEntry,after:HistoryEntry){
+    setHistory(previous=>{
+      const entries=previous.entries.slice(0,previous.position);
+      entries.push(before,after);
+      const bounded=entries.slice(-60);
+      return {entries:bounded,position:bounded.length-1};
+    });
+  }
+  function applyWiki(wiki:WikiView|null){
+    setDoc(wiki?.document??null);
+    setBacklinks(wiki?.backlinks.items??[]);
+    setNextBack(wiki?.backlinks.next_offset??null);
+    setLinks(wiki?.links.items??[]);
+    setNextLinkOffset(wiki?.links.next_offset??null);
+  }
+  async function search() {
     if(busy)return;
+    const before=capture();
+    const query=q.trim();
+    const current=++generation.current;
+    setError('');setBusy(true);
+    try{
+      const found=await api<Page<Hit>>('search-page',project,{q:query,limit:'50'});
+      if(current!==generation.current)return;
+      setHits(found.items);setNextHit(found.next_offset);setSearched(query);setQ(query);
+      setSource('');applyWiki(null);setAnchor('');setView('wiki');
+      record(before,{query,source:'',path:'',anchor:'',scroll:0,view:'wiki'});
+    }catch(e){if(current===generation.current)setError(String(e));}
+    finally{if(current===generation.current)setBusy(false);}
+  }
+  async function open(path:string,fragment=''){
+    if(busy)return;
+    const before=capture();
+    const nextSource=sourceFor(path);
+    const after:HistoryEntry={...before,source:nextSource,path,anchor:fragment,scroll:0,view:'wiki'};
     if(path===doc?.path){
-      setView('wiki');
-      setAnchor(fragment);
+      if(fragment!==anchor||view!=='wiki')record(before,after);
+      setView('wiki');setAnchor(fragment);setSource(nextSource);
       if(!fragment)centralPane.current?.scrollTo(0,0);
       return;
     }
-    const current = ++generation.current;
-    setError(''); setBusy(true);
-    try {
-      const {document:d,backlinks:b,links:page}=await api<WikiView>('wiki-view',project,{path});
-      if (current === generation.current) { setDoc(d); syncSource(d.path); setBacklinks(b.items);setNextBack(b.next_offset); setLinks(page.items); setNextLinkOffset(page.next_offset);setAnchor(fragment);setView('wiki'); }
-    } catch (e) { if (current === generation.current) setError(String(e)); }
-    finally { if (current === generation.current) setBusy(false); }
+    const current=++generation.current;
+    setError('');setBusy(true);
+    try{
+      const wiki=await api<WikiView>('wiki-view',project,{path});
+      if(current!==generation.current)return;
+      applyWiki(wiki);setSource(nextSource);setAnchor(fragment);setView('wiki');
+      record(before,after);
+    }catch(e){if(current===generation.current)setError(String(e));}
+    finally{if(current===generation.current)setBusy(false);}
+  }
+  async function moveHistory(delta:number){
+    const position=history.position+delta;
+    const entry=history.entries[position];
+    if(busy||!entry)return;
+    const before=capture();
+    const current=++generation.current;
+    setError('');setBusy(true);
+    try{
+      const [found,wiki]=await Promise.all([
+        entry.query===searched?null:api<Page<Hit>>('search-page',project,{q:entry.query,limit:'50'}),
+        entry.path?api<WikiView>('wiki-view',project,{path:entry.path}):null,
+      ]);
+      if(current!==generation.current)return;
+      if(found){setHits(found.items);setNextHit(found.next_offset);}
+      setQ(entry.query);setSearched(entry.query);setSource(entry.source);
+      applyWiki(wiki);setAnchor(entry.anchor);setView(entry.view);
+      pendingScroll.current=entry.scroll;
+      const entries=history.entries.slice();
+      entries[history.position]=before;
+      setHistory({entries,position});
+    }catch(e){if(current===generation.current)setError(String(e));}
+    finally{if(current===generation.current)setBusy(false);}
   }
   async function moreLinks() {
     if (!doc || nextLinkOffset === null || busy) return;
@@ -157,10 +221,10 @@ function App() {
     const original=slash<0?undefined:sourceTitles.get(path.slice(0,slash)+'.md');
     return original?`（${original}）${title}`:title;
   }
-  function syncSource(path:string){
+  function sourceFor(path:string){
     const folder=path.split('/')[0];
     const match=sources.find(item=>item.path===path||item.path===folder+'.md');
-    setSource(current=>match?.path??(current?'':current));
+    return match?.path??'';
   }
   useEffect(()=>{
     const pane=leftPane.current;
@@ -202,12 +266,12 @@ function App() {
     <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
     <section className="toolbar" aria-label="検索条件">
       <label>プロジェクト<select disabled={busy} value={project} onChange={e => setProject(e.target.value)}><option value="" disabled>プロジェクトを選択</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-      <form onSubmit={e => { e.preventDefault(); setSource(''); void search(); }}><label htmlFor="query">全文検索</label><div className="search"><input id="query" value={q} onChange={e => setQ(e.target.value)} placeholder="キーワードを入力（日本語・中文・English）"/><button disabled={!project || busy}>検索</button></div></form>
+      <form onSubmit={e => { e.preventDefault(); void search(); }}><label htmlFor="query">全文検索</label><div className="search"><input id="query" value={q} onChange={e => setQ(e.target.value)} placeholder="キーワードを入力（日本語・中文・English）"/><button disabled={!project || busy}>検索</button></div></form>
     </section>
     <details className="workspace-settings"><summary>プロジェクト管理・監視</summary><ProjectManager current={projects.find(p=>p.id===project)} enabled={capabilities.admin} folderPicker={capabilities.folder_picker} onChanged={refreshProjects} onBusy={setAdminBusy}/>
     {capabilities.desktop&&project&&<WatchManager key={project} project={project} onRefresh={()=>setRevision(v=>v+1)}/>}</details>
     {stats&&<div className="project-stats"><span>文書 <strong>{stats.documents.toLocaleString()}</strong></span><span>リンク <strong>{stats.links.toLocaleString()}</strong></span><span>リンク先なし <strong>{stats.missing.toLocaleString()}</strong></span><span>同名候補あり <strong>{stats.ambiguous.toLocaleString()}</strong></span><span>見出しなし <strong>{stats.missing_heading.toLocaleString()}</strong></span><span title="他の文書との解決済みリンクがない文書">孤立文書 <strong>{stats.isolated.toLocaleString()}</strong></span><span>同名文書群 <strong>{stats.duplicate_names.toLocaleString()}</strong></span></div>}
-    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}<button className="expand-workspace" type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'閲覧エリアを全画面に拡大'}</button></div>}
+    {project&&<div className="view-tabs" role="tablist" aria-label="表示切替"><button type="button" disabled={busy||history.position<=0} onClick={()=>void moveHistory(-1)}>‹ 戻る</button><button type="button" disabled={busy||history.position>=history.entries.length-1} onClick={()=>void moveHistory(1)}>進む ›</button><button role="tab" aria-selected={view==='wiki'} onClick={()=>setView('wiki')}>Wiki</button><button role="tab" aria-selected={view==='graph'} onClick={()=>setView('graph')}>リンク図</button>{doc&&view==='graph'&&<button onClick={()=>setDoc(null)}>プロジェクト全体を見る</button>}<button className="expand-workspace" type="button" aria-pressed={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'通常表示に戻す（Esc）':'閲覧エリアを全画面に拡大'}</button></div>}
     {error && <p role="alert" className="error">{error}</p>}
     {!projects.length && !error && <p className="empty">「新規プロジェクト」からMarkdownフォルダを登録してください。</p>}
     <div className="workspace" aria-busy={busy}>
