@@ -53,8 +53,8 @@ function App() {
   const leftPane=useRef<HTMLDivElement>(null);
   const centralPane=useRef<HTMLElement>(null);
   const [anchor,setAnchor]=useState('');
-  useEffect(()=>{if(anchor&&doc&&!doc.chapters){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
-  useEffect(()=>{if(!anchor||doc?.chapters)centralPane.current?.scrollTo(0,0);},[doc,anchor]);
+  useEffect(()=>{if(anchor&&anchor!=='wiki:original'&&doc&&!doc.chapters){let id=anchor;try{id=decodeURIComponent(anchor);}catch{};(window.document.getElementById(id)||window.document.getElementById(headingId(id)))?.scrollIntoView();}},[doc,anchor]);
+  useEffect(()=>{if(!anchor||anchor==='wiki:original'||doc?.chapters)centralPane.current?.scrollTo(0,0);},[doc,anchor]);
   useEffect(()=>{
     if(!expanded&&!graphExpanded)return;
     const exit=(event:KeyboardEvent)=>{
@@ -254,11 +254,23 @@ function App() {
     items.push(hit);
     groups.set(kind,items);
   }
+  const elementContents=new Map<string,Hit[]>();
+  if(doc&&!anchor&&sourceTitles.has(doc.path)){
+    const folder=doc.path.slice(0,-3)+'/';
+    for(const hit of sourcePages){
+      if(!hit.path.startsWith(folder))continue;
+      const kind=hit.title.split(' · ')[0];
+      const items=elementContents.get(kind)??[];
+      items.push(hit);
+      elementContents.set(kind,items);
+    }
+  }
+  const showElementContents=elementContents.size>0;
   const outgoing = links.filter(l => l.source === doc?.path);
   const wikiNavigation=useRef({open,navigate});
   wikiNavigation.current={open,navigate};
   const wikiBody=useMemo(()=>{
-    if(!doc||doc.chapters&&doc.chapter==null)return null;
+    if(!doc||showElementContents||doc.chapters&&doc.chapter==null)return null;
     const outgoing=links.filter(link=>link.source===doc.path);
     return <Markdown skipHtml remarkPlugins={[remarkGfm,remarkWiki,remarkFlowTables]} rehypePlugins={[rehypeHeadingIds]} components={{
         pre: WikiPre,
@@ -271,7 +283,7 @@ function App() {
         },
         img: ({ alt }) => <span className="image-placeholder">[画像: {alt || '画像'}]</span>
       }}>{displayMarkdown(doc.markdown)}</Markdown>;
-  },[doc,links]);
+  },[doc,links,showElementContents]);
   return <div className={`app ${expanded?'wiki-expanded':''} ${graphExpanded&&view==='graph'?'graph-expanded':''}`}>
     <header><div className="brand">MK<span>H</span></div><div><h1>Markdown Knowledge Hub</h1><p>プロジェクトの知識を、つながりから読む{capabilities.desktop?' · Desktop':''}</p></div><span className="badge">原本Markdownは読み取り専用</span></header>
     <section className="toolbar" aria-label="プロジェクト選択">
@@ -326,13 +338,26 @@ function App() {
       <main ref={centralPane}>
 
       {view==='graph'&&project?<Suspense fallback={<p>リンク図を準備しています…</p>}><GraphView key={`${project}-${revision}`} project={project} center={doc?.path} expanded={graphExpanded} onToggleExpand={()=>setGraphExpanded(value=>!value)} onOpen={path=>void open(path)}/></Suspense>:doc ? <><div className="docpath">{doc.path}</div>
-        {doc.chapters&&<section className="chapter-reader" aria-label="元仕様書の章">
+        {showElementContents?<section aria-label="要素別Wikiの目次">
+          <h1>{doc.title}</h1>
+          <h2>要素別Wikiの目次</h2>
+          <button type="button" disabled={busy} onClick={()=>void open(doc.path,'wiki:original')}>元仕様書を読む</button>
+          {[...elementContents].map(([kind,items])=><section key={kind}>
+            <h3>{kind} <small>{items.length}件</small></h3>
+            <ul>{items.map(item=><li key={item.path}>
+              <button className="inline" type="button" disabled={busy} onClick={()=>void open(item.path)}>
+                {item.title.slice(kind.length+3)||item.title}
+              </button>
+            </li>)}</ul>
+          </section>)}
+        </section>:sourceTitles.has(doc.path)&&anchor&&<button type="button" disabled={busy} onClick={()=>void open(doc.path)}>要素別Wikiの目次へ</button>}
+        {doc.chapters&&!showElementContents&&<section className="chapter-reader" aria-label="元仕様書の章">
           <h2>{doc.title} の目次</h2>
           <label>章を選択 <select aria-label="章を選択" disabled={busy} value={doc.chapter==null?'':String(doc.chapter)}
             onChange={event=>{
               const value=event.target.value;
               const chapter=value===''?undefined:doc.chapters?.[Number(value)];
-              void open(doc.path,chapter?`chapter:${chapter.start}`:'');
+              void open(doc.path,chapter?`chapter:${chapter.start}`:'wiki:original');
             }}>
             <option value="">目次のみ</option>
             {doc.chapters.map((chapter,index)=><option key={chapter.start} value={index}>{chapter.title}</option>)}
