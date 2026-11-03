@@ -21,6 +21,11 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// OML UtilitiesのMarkdownからWikiを生成します。
+    CompileOmlWiki {
+        input: PathBuf,
+        destination: PathBuf,
+    },
     Add {
         id: String,
         name: String,
@@ -88,8 +93,14 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Command::CompileOmlWiki { input, destination } = &args.command {
+        let report = hub_core::compile_oml_wiki(input, destination)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let mut hub = Hub::open(&args.data)?;
     let value = match args.command {
+        Command::CompileOmlWiki { .. } => unreachable!(),
         Command::Add {
             id,
             name,
