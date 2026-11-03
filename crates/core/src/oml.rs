@@ -91,6 +91,7 @@ fn parse(path: PathBuf, source: String) -> Option<Spec> {
 #[derive(Serialize)]
 pub struct OmlReport {
     pub modules: usize,
+    pub elements: usize,
     pub resolved_references: usize,
     pub unresolved_references: usize,
 }
@@ -162,6 +163,7 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
     };
     let mut report = OmlReport {
         modules: specs.len(),
+        elements: 0,
         resolved_references: 0,
         unresolved_references: 0,
     };
@@ -207,6 +209,26 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
             literal(&spec.path.to_string_lossy()),
             dependencies[id]
         );
+        let elements = crate::oml_elements::extract(&spec.source);
+        if !elements.is_empty() {
+            let module_page = page(id);
+            let folder = module_page.trim_end_matches(".md");
+            fs::create_dir(destination.join(folder))?;
+            body.push_str("\n## 要素別Wiki\n\n");
+            for (number, element) in elements.into_iter().enumerate() {
+                let title = format!("{} · {}", element.kind, literal(&element.title));
+                let relative = format!("{folder}/{}.md", number + 1);
+                body.push_str(&format!("- [{title}]({relative})\n"));
+                let content = format!(
+                    "# {title}\n\n[元仕様書ページ](../{module_page}) · {} {} 行\n\n{}",
+                    literal(&spec.path.to_string_lossy()),
+                    element.line,
+                    element.body
+                );
+                fs::write(destination.join(relative), content)?;
+                report.elements += 1;
+            }
+        }
         body.push_str("\n## 元仕様書\n\n");
         body.push_str(&spec.source);
         fs::write(destination.join(page(id)), body)?;
@@ -278,6 +300,34 @@ impl crate::Hub {
 mod tests {
     use super::*;
     use crate::Hub;
+
+    #[test]
+    fn elements_are_grouped_by_source_and_backlinks_have_titles() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source");
+        let wiki = temp.path().join("wiki");
+        fs::create_dir(&source)?;
+        fs::write(
+            source.join("orders.md"),
+            "# Orders モジュール仕様書\n\n# 画面: EditOrder\n\n## スクリーンアクション\n\n### Save\n\n画面処理\n\n# サーバーアクション: Store\n\nサーバー処理\n\n## エンティティ\n\n### Order\n\n注文データ",
+        )?;
+        assert_eq!(compile_oml_wiki(&source, &wiki)?.elements, 4);
+        let mut hub = Hub::open(&temp.path().join("settings"))?;
+        hub.register("oml", "OML", &wiki)?;
+        hub.scan("oml")?;
+        let sources = hub.oml_catalog("oml", "")?;
+        assert_eq!(sources.len(), 1);
+        let pages = hub.oml_catalog("oml", &sources[0].path)?;
+        assert_eq!(pages.len(), 5);
+        let screen = pages
+            .iter()
+            .find(|hit| hit.title == "画面 · EditOrder")
+            .context("screen page")?;
+        let backlinks = hub.backlink_details("oml", &screen.path, 0, 20)?;
+        assert_eq!(backlinks.items[0].title, "Orders");
+        assert!(backlinks.items.iter().all(|hit| hit.path != screen.path));
+        Ok(())
+    }
 
     #[test]
     fn compiled_dependencies_are_searchable_and_have_backlinks() -> Result<()> {

@@ -32,6 +32,16 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             number(args, "offset", 0)?,
             number(args, "limit", 50)?,
         )?)?,
+        "oml-catalog" => serde_json::to_value(hub.oml_catalog(
+            text(args, "project")?,
+            args.get("path").and_then(Value::as_str).unwrap_or(""),
+        )?)?,
+        "backlink-details" => serde_json::to_value(hub.backlink_details(
+            text(args, "project")?,
+            text(args, "path")?,
+            number(args, "offset", 0)?,
+            number(args, "limit", 100)?,
+        )?)?,
         "backlinks-page" => serde_json::to_value(hub.backlinks_page(
             text(args, "project")?,
             text(args, "path")?,

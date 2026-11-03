@@ -82,3 +82,51 @@ impl Hub {
         Ok(page(items, offset, limit))
     }
 }
+
+impl Hub {
+    pub fn backlink_details(
+        &self,
+        id: &str,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<SearchHit>> {
+        validate(offset, limit)?;
+        let _lock = self.project_lock(id, true)?;
+        let db = self.db(id)?;
+        let mut statement = db.prepare(
+            "SELECT DISTINCT d.path,d.title FROM links l JOIN docs d ON d.path=l.source
+             WHERE l.resolved=?1 AND l.source<>?1 ORDER BY d.title,d.path LIMIT ?2 OFFSET ?3",
+        )?;
+        let items = statement
+            .query_map(params![path, (limit + 1) as i64, offset as i64], |row| {
+                Ok(SearchHit {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(page(items, offset, limit))
+    }
+
+    pub fn oml_catalog(&self, id: &str, source: &str) -> Result<Vec<SearchHit>> {
+        let _lock = self.project_lock(id, true)?;
+        let db = self.db(id)?;
+        let prefix = format!("{}/", source.trim_end_matches(".md"));
+        let mut statement = db.prepare(
+            "SELECT path,title FROM docs WHERE
+             (?1='' AND path GLOB 'oml-*.md' AND instr(path,'/')=0)
+             OR (?1<>'' AND (path=?1 OR substr(path,1,length(?2))=?2))
+             ORDER BY title,path",
+        )?;
+        let items = statement
+            .query_map(params![source, prefix], |row| {
+                Ok(SearchHit {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(items)
+    }
+}

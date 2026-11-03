@@ -184,6 +184,8 @@ fn router(data: PathBuf) -> Router {
         .route("/api/projects", get(projects))
         .route("/api/search", get(search))
         .route("/api/search-page", get(search_page))
+        .route("/api/oml-catalog", get(oml_catalog))
+        .route("/api/backlink-details", get(backlink_details))
         .route("/api/backlinks-page", get(backlinks_page))
         .route("/api/document", get(document))
         .route("/api/backlinks", get(backlinks))
@@ -333,6 +335,23 @@ async fn search_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters
         Ok(serde_json::to_value(
             h.search_page(&p.project, &p.q, p.offset, p.limit)?,
         )?)
+    })
+    .await
+}
+async fn oml_catalog(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.oml_catalog(&p.project, &p.path)?)?)
+    })
+    .await
+}
+async fn backlink_details(
+    State(data): State<PathBuf>,
+    Query(p): Query<LinkParameters>,
+) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.backlink_details(
+            &p.project, &p.path, p.offset, p.limit,
+        )?)?)
     })
     .await
 }
