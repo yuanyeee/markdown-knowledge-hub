@@ -67,6 +67,38 @@ mod tests {
         assert_eq!(hub.search("demo", "東京").unwrap().len(), 1);
         assert_eq!(hub.search("demo", "customer 注文").unwrap().len(), 1);
         assert_eq!(hub.search("demo", "東").unwrap().len(), 2);
+        let hits = hub.search("demo", "東京注文").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0]
+                .snippet
+                .as_deref()
+                .is_some_and(|s| s.contains("東京注文"))
+        );
+        assert!(hub.search("demo", "").unwrap()[0].snippet.is_none());
+    }
+    #[test]
+    fn single_umbrella_folder_expands_summary_to_second_level() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("specs/orders")).unwrap();
+        std::fs::create_dir_all(source.path().join("specs/customers")).unwrap();
+        std::fs::write(
+            source.path().join("specs/orders/order.md"),
+            "# Order\n[[customer]]",
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("specs/customers/customer.md"),
+            "# Customer",
+        )
+        .unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+        let summary = hub.graph_summary("demo").unwrap();
+        assert_eq!(summary.nodes.len(), 2);
+        assert_eq!(summary.edges.len(), 1);
     }
     #[test]
     fn backlink_pages_and_folder_summary_cover_all_documents() {

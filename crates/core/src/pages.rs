@@ -42,23 +42,23 @@ impl Hub {
                     Ok(SearchHit {
                         path: r.get(0)?,
                         title: r.get(1)?,
+                        snippet: None,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
         } else {
             // Resolve both stores from the same generation, even if publication occurs now.
             let dir = self.index_dir_in_snapshot(id, &db)?;
+            let mut doc_stmt =
+                db.prepare("SELECT path,title,substr(body,1,16384) FROM docs WHERE path=?1")?;
             for path in Search::cached(&dir.join("search"))?.query_page(q, offset, limit + 1)? {
-                items.push(db.query_row(
-                    "SELECT path,title FROM docs WHERE path=?1",
-                    [path],
-                    |r| {
-                        Ok(SearchHit {
-                            path: r.get(0)?,
-                            title: r.get(1)?,
-                        })
-                    },
-                )?);
+                let (p, title, body): (String, String, String) =
+                    doc_stmt.query_row([path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                items.push(SearchHit {
+                    snippet: crate::store::extract_snippet(&body, q),
+                    path: p,
+                    title,
+                });
             }
         }
         Ok(page(items, offset, limit))

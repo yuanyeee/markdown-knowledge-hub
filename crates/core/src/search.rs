@@ -126,15 +126,21 @@ impl Search {
         documents: impl IntoIterator<Item = Result<(String, String, String)>>,
     ) -> Result<()> {
         let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
-        // Keep foreground deltas small. Explicit rebuild performs compaction.
-        if !reset
-            && self
-                .index
-                .searchable_segment_metas()?
-                .iter()
-                .any(|m| m.num_docs() > 0)
-        {
-            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+        // Keep foreground deltas small while compacting tiny delta segments if many accumulate.
+        let non_empty_segments = self
+            .index
+            .searchable_segment_metas()?
+            .iter()
+            .filter(|m| m.num_docs() > 0)
+            .count();
+        if !reset && non_empty_segments > 0 {
+            if non_empty_segments < 24 {
+                writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+            } else {
+                let mut policy = tantivy::merge_policy::LogMergePolicy::default();
+                policy.set_max_docs_before_merge(5_000);
+                writer.set_merge_policy(Box::new(policy));
+            }
         }
         if reset {
             writer.delete_all_documents()?;
@@ -197,16 +203,14 @@ impl Search {
                     let body = if width == 1 { body_one } else { self.body };
                     let make = |field| -> Box<dyn Query> {
                         let chars = word.chars().collect::<Vec<_>>();
-                        let terms = chars
-                            .windows(width)
-                            .enumerate()
-                            .map(|(position, gram)| {
-                                (
-                                    position,
-                                    Term::from_field_text(field, &gram.iter().collect::<String>()),
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        let terms = if width == 1 {
+                            vec![(
+                                0,
+                                Term::from_field_text(field, &chars.iter().collect::<String>()),
+                            )]
+                        } else {
+                            stride2_bigram_terms(&chars, field)
+                        };
                         if terms.len() == 1 {
                             Box::new(TermQuery::new(
                                 terms[0].1.clone(),
@@ -252,4 +256,23 @@ impl Search {
         }
         Ok(paths)
     }
+}
+
+/// Cover all character positions of `chars` (len >= 2) using non-overlapping stride-2 bigrams
+/// plus one trailing bigram when `chars.len()` is odd. This preserves exact literal matching
+/// while halving the number of posting lists intersected in `PhraseQuery`.
+fn stride2_bigram_terms(chars: &[char], field: Field) -> Vec<(usize, Term)> {
+    let mut terms = Vec::with_capacity(chars.len().div_ceil(2));
+    let mut pos = 0;
+    while pos + 2 <= chars.len() {
+        let gram: String = chars[pos..pos + 2].iter().collect();
+        terms.push((pos, Term::from_field_text(field, &gram)));
+        pos += 2;
+    }
+    if chars.len() % 2 == 1 {
+        let last = chars.len() - 2;
+        let gram: String = chars[last..last + 2].iter().collect();
+        terms.push((last, Term::from_field_text(field, &gram)));
+    }
+    terms
 }

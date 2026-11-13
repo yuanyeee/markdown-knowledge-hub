@@ -34,6 +34,8 @@ pub struct Document {
 pub struct SearchHit {
     pub path: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct Link {
@@ -50,7 +52,7 @@ pub struct LinkPage {
 pub struct Hub {
     pub(crate) data: PathBuf,
     pub(crate) registry: Connection,
-    pub(crate) working: Option<(String, PathBuf)>,
+    pub(crate) working: Option<crate::generations::WorkingGeneration>,
 }
 struct Candidate {
     path: String,
@@ -187,7 +189,15 @@ impl Hub {
         Ok(dir)
     }
     pub(crate) fn db(&self, id: &str) -> Result<Connection> {
-        let db = self.write_db(id)?;
+        let dir = self.dir(id)?;
+        let db_path = dir.join("metadata.sqlite");
+        let db = if db_path.is_file() {
+            let conn = Connection::open(&db_path)?;
+            conn.busy_timeout(Duration::from_secs(10))?;
+            conn
+        } else {
+            self.write_db(id)?
+        };
         db.execute_batch("BEGIN DEFERRED;")?;
         // Pin the metadata snapshot before resolving its paired search generation.
         db.query_row("SELECT COUNT(*) FROM state", [], |r| r.get::<_, i64>(0))?;
@@ -200,6 +210,8 @@ impl Hub {
         db.busy_timeout(Duration::from_secs(10))?;
         db.execute_batch("PRAGMA journal_mode=WAL;
           CREATE TABLE IF NOT EXISTS docs(path TEXT PRIMARY KEY,size INTEGER,mtime TEXT,hash TEXT,title TEXT,body TEXT,raw TEXT);
+          CREATE TABLE IF NOT EXISTS doc_stems(path TEXT PRIMARY KEY,stem TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS doc_stems_stem ON doc_stems(stem);
           CREATE TABLE IF NOT EXISTS link_keys(source TEXT, name TEXT);
           CREATE INDEX IF NOT EXISTS link_keys_name ON link_keys(name);
           CREATE INDEX IF NOT EXISTS link_keys_source ON link_keys(source);
@@ -207,9 +219,11 @@ impl Hub {
           CREATE INDEX IF NOT EXISTS aliases_name ON aliases(name);
           CREATE TABLE IF NOT EXISTS headings(path TEXT, name TEXT);
           CREATE INDEX IF NOT EXISTS headings_path ON headings(path);
+          CREATE INDEX IF NOT EXISTS headings_path_name ON headings(path, name);
           CREATE TABLE IF NOT EXISTS links(source TEXT,target TEXT,resolved TEXT,status TEXT);
           CREATE INDEX IF NOT EXISTS links_resolved ON links(resolved);
           CREATE INDEX IF NOT EXISTS links_source ON links(source);
+          CREATE INDEX IF NOT EXISTS links_status ON links(status);
           CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value INTEGER);
           CREATE TABLE IF NOT EXISTS state_text(key TEXT PRIMARY KEY,value TEXT);
           INSERT OR IGNORE INTO state VALUES('dirty',0);
@@ -406,6 +420,7 @@ impl Hub {
             }
             tx.execute("DELETE FROM link_keys WHERE source=?1", [path])?;
             tx.execute("DELETE FROM docs WHERE path=?1", [path])?;
+            tx.execute("DELETE FROM doc_stems WHERE path=?1", [path])?;
             tx.execute("DELETE FROM aliases WHERE path=?1", [path])?;
             tx.execute("DELETE FROM headings WHERE path=?1", [path])?;
             tx.execute("DELETE FROM links WHERE source=?1", [path])?;
@@ -478,6 +493,12 @@ impl Hub {
                             c.raw
                         ],
                     )?;
+                    if let Some(stem) = Path::new(&c.path).file_stem().and_then(|s| s.to_str()) {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO doc_stems VALUES(?1,?2)",
+                            params![c.path, stem],
+                        )?;
+                    }
                     if !old.contains_key(&c.path) {
                         affected_names.insert(link_key(&c.path));
                     }
@@ -506,6 +527,7 @@ impl Hub {
         }
         let content_changed = report.changed > 0 || !deleted.is_empty();
         if content_changed {
+            ensure_doc_stems_synced(&tx)?;
             let mut sources = documents.iter().cloned().collect::<HashSet<_>>();
             let keys = affected_names.into_iter().collect::<Vec<_>>();
             for batch in keys.chunks(100) {
@@ -550,23 +572,25 @@ impl Hub {
                     Ok(SearchHit {
                         path: r.get(0)?,
                         title: r.get(1)?,
+                        snippet: None,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?);
         }
         let dir = self.index_dir_in_snapshot(id, &db)?;
+        let mut doc_stmt =
+            db.prepare("SELECT path,title,substr(body,1,16384) FROM docs WHERE path=?1")?;
         Search::cached(&dir.join("search"))?
             .query(q)?
             .into_iter()
             .map(|p| {
-                Ok(
-                    db.query_row("SELECT path,title FROM docs WHERE path=?1", [p], |r| {
-                        Ok(SearchHit {
-                            path: r.get(0)?,
-                            title: r.get(1)?,
-                        })
-                    })?,
-                )
+                let (path, title, body): (String, String, String) =
+                    doc_stmt.query_row([p], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                Ok(SearchHit {
+                    snippet: extract_snippet(&body, q),
+                    path,
+                    title,
+                })
             })
             .collect()
     }
@@ -727,8 +751,33 @@ fn validate_relative_md(path: &str) -> Result<()> {
     }
     Ok(())
 }
+fn ensure_doc_stems_synced(db: &Connection) -> Result<()> {
+    let docs_count: i64 = db.query_row("SELECT COUNT(*) FROM docs", [], |r| r.get(0))?;
+    let stems_count: i64 = db.query_row("SELECT COUNT(*) FROM doc_stems", [], |r| r.get(0))?;
+    if docs_count != stems_count {
+        db.execute("DELETE FROM doc_stems", [])?;
+        let all_paths = {
+            let mut s = db.prepare("SELECT path FROM docs")?;
+            s.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut ins = db.prepare("INSERT INTO doc_stems VALUES(?1,?2)")?;
+        for path in all_paths {
+            if let Some(stem) = Path::new(&path).file_stem().and_then(|s| s.to_str()) {
+                ins.execute(params![path, stem])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+type PendingLinkRow = (i64, String, String, Option<String>, String);
+
 fn resolve(db: &Connection, sources: Option<&[String]>) -> Result<()> {
     if let Some(sources) = sources {
+        if sources.is_empty() {
+            return Ok(());
+        }
         db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS resolving_sources(path TEXT PRIMARY KEY); DELETE FROM resolving_sources;")?;
         let mut insert = db.prepare_cached("INSERT OR IGNORE INTO resolving_sources VALUES(?1)")?;
         for source in sources {
@@ -740,7 +789,7 @@ fn resolve(db: &Connection, sources: Option<&[String]>) -> Result<()> {
     } else {
         "SELECT rowid,source,target,resolved,status FROM links"
     };
-    let links = {
+    let links: Vec<PendingLinkRow> = {
         let mut s = db.prepare(sql)?;
         s.query_map([], |r| {
             Ok((
@@ -756,6 +805,136 @@ fn resolve(db: &Connection, sources: Option<&[String]>) -> Result<()> {
     if links.is_empty() {
         return Ok(());
     }
+    if sources.is_some() && links.len() <= 2_000 {
+        return resolve_scoped(db, links);
+    }
+    resolve_bulk(db, links)
+}
+
+fn parse_link_target(
+    source: &str,
+    raw_target: &str,
+) -> (bool, String, Option<String>, Option<String>, Option<String>) {
+    let (base, anchor) = raw_target
+        .split_once('#')
+        .map(|(a, b)| (a, Some(b)))
+        .unwrap_or((raw_target, None));
+    let self_link = base.is_empty();
+    let anchor = anchor.map(|a| {
+        percent_encoding::percent_decode_str(a)
+            .decode_utf8_lossy()
+            .into_owned()
+    });
+    let target = percent_encoding::percent_decode_str(base)
+        .decode_utf8_lossy()
+        .replace('\\', "/");
+    let mut target = target.trim().to_string();
+    if !target.to_lowercase().ends_with(".md") {
+        target.push_str(".md");
+    }
+    let parent = source.rsplit_once('/').map(|v| v.0).unwrap_or("");
+    let relative = normalize(&format!("{parent}/{target}"));
+    let absolute = normalize(&target);
+    (self_link, target, anchor, relative, absolute)
+}
+
+/// Incremental link resolution using indexed point lookups instead of loading all docs/headings.
+fn resolve_scoped(db: &Connection, links: Vec<PendingLinkRow>) -> Result<()> {
+    let mut path_cache: HashMap<String, bool> = HashMap::new();
+    let mut stem_cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut heading_cache: HashMap<(String, String), bool> = HashMap::new();
+
+    let mut path_exists_stmt =
+        db.prepare_cached("SELECT EXISTS(SELECT 1 FROM docs WHERE path=?1)")?;
+    let mut candidates_stmt = db.prepare_cached(
+        "SELECT path FROM doc_stems WHERE stem=?1 UNION SELECT path FROM aliases WHERE name=?1 LIMIT 2",
+    )?;
+    let mut heading_exists_stmt = db.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM headings WHERE path=?1 AND (name=?2 OR name=?3))",
+    )?;
+    let mut update = db.prepare_cached("UPDATE links SET resolved=?2,status=?3 WHERE rowid=?1")?;
+
+    let mut doc_exists = |candidate: &str| -> Result<bool> {
+        if let Some(&exists) = path_cache.get(candidate) {
+            return Ok(exists);
+        }
+        let exists: bool = path_exists_stmt.query_row([candidate], |r| r.get(0))?;
+        path_cache.insert(candidate.to_string(), exists);
+        Ok(exists)
+    };
+
+    for (row, source, raw_target, previous, previous_status) in links {
+        let (self_link, target, anchor, relative, absolute) =
+            parse_link_target(&source, &raw_target);
+        let exact = if self_link {
+            Some(source.clone())
+        } else if let Some(rel) = relative
+            && doc_exists(&rel)?
+        {
+            Some(rel)
+        } else if let Some(abs) = absolute
+            && doc_exists(&abs)?
+        {
+            Some(abs)
+        } else {
+            None
+        };
+
+        let candidates: Option<&[String]> = if exact.is_some() || target.contains('/') {
+            // Note: even when `exact` is None and `target` has no '/', compute stem candidates.
+            None
+        } else if let Some(stem) = Path::new(&target).file_stem().and_then(|s| s.to_str()) {
+            if !stem_cache.contains_key(stem) {
+                let found = candidates_stmt
+                    .query_map([stem], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                stem_cache.insert(stem.to_string(), found);
+            }
+            stem_cache.get(stem).map(Vec::as_slice)
+        } else {
+            None
+        };
+
+        let mut resolved =
+            exact.or_else(|| candidates.filter(|v| v.len() == 1).map(|v| v[0].clone()));
+        let missing_heading = if let (Some(path), Some(anchor_str)) = (&resolved, &anchor) {
+            if anchor_str.is_empty() {
+                false
+            } else {
+                let key = (path.clone(), anchor_str.clone());
+                let present = if let Some(&cached) = heading_cache.get(&key) {
+                    cached
+                } else {
+                    let slug = parser::heading_id(anchor_str);
+                    let exists: bool = heading_exists_stmt
+                        .query_row(params![path, anchor_str, slug], |r| r.get(0))?;
+                    heading_cache.insert(key, exists);
+                    exists
+                };
+                !present
+            }
+        } else {
+            false
+        };
+
+        let status = if missing_heading {
+            resolved = None;
+            "missing-heading"
+        } else if resolved.is_some() {
+            "resolved"
+        } else if candidates.is_some_and(|v| v.len() > 1) {
+            "ambiguous"
+        } else {
+            "missing"
+        };
+        if previous != resolved || previous_status != status {
+            update.execute(params![row, resolved, status])?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_bulk(db: &Connection, links: Vec<PendingLinkRow>) -> Result<()> {
     let paths: HashSet<String> = {
         let mut s = db.prepare("SELECT path FROM docs")?;
         s.query_map([], |r| r.get(0))?
@@ -786,27 +965,9 @@ fn resolve(db: &Connection, sources: Option<&[String]>) -> Result<()> {
         }
     }
     let mut update = db.prepare_cached("UPDATE links SET resolved=?2,status=?3 WHERE rowid=?1")?;
-    for (row, source, target, previous, previous_status) in links {
-        let (base, anchor) = target
-            .split_once('#')
-            .map(|(a, b)| (a, Some(b)))
-            .unwrap_or((&target, None));
-        let self_link = base.is_empty();
-        let anchor = anchor.map(|a| {
-            percent_encoding::percent_decode_str(a)
-                .decode_utf8_lossy()
-                .into_owned()
-        });
-        let target = percent_encoding::percent_decode_str(base)
-            .decode_utf8_lossy()
-            .replace('\\', "/");
-        let mut target = target.trim().to_string();
-        if !target.to_lowercase().ends_with(".md") {
-            target.push_str(".md");
-        }
-        let parent = source.rsplit_once('/').map(|v| v.0).unwrap_or("");
-        let relative = normalize(&format!("{parent}/{target}"));
-        let absolute = normalize(&target);
+    for (row, source, raw_target, previous, previous_status) in links {
+        let (self_link, target, anchor, relative, absolute) =
+            parse_link_target(&source, &raw_target);
         let exact = if self_link {
             Some(source.clone())
         } else {
@@ -861,4 +1022,95 @@ fn link_key(target: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+pub(crate) fn extract_snippet(body: &str, query: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+
+    let match_byte = if trimmed.is_ascii() {
+        let lower = trimmed.to_ascii_lowercase();
+        terms.iter().filter_map(|t| lower.find(t.as_str())).min()
+    } else {
+        let lower = trimmed.to_lowercase();
+        if lower.len() == trimmed.len() {
+            terms
+                .iter()
+                .filter_map(|t| lower.find(t.as_str()))
+                .filter(|&idx| trimmed.is_char_boundary(idx))
+                .min()
+        } else {
+            let char_terms: Vec<Vec<char>> = terms.iter().map(|t| t.chars().collect()).collect();
+            trimmed
+                .char_indices()
+                .find(|&(idx, _)| {
+                    char_terms
+                        .iter()
+                        .any(|term| starts_with_lowercase_chars(&trimmed[idx..], term))
+                })
+                .map(|(idx, _)| idx)
+        }
+    };
+
+    let center_byte = match_byte.unwrap_or(0);
+    let start_byte = if center_byte == 0 {
+        0
+    } else {
+        trimmed[..center_byte]
+            .char_indices()
+            .rev()
+            .nth(36)
+            .map(|(idx, _)| idx)
+            .unwrap_or(0)
+    };
+    let end_byte = trimmed[center_byte..]
+        .char_indices()
+        .nth(96)
+        .map(|(idx, _)| center_byte + idx)
+        .unwrap_or(trimmed.len());
+
+    let mut collapsed = String::with_capacity(160);
+    if start_byte > 0 {
+        collapsed.push('…');
+    }
+    let mut prev_space = false;
+    for ch in trimmed[start_byte..end_byte].chars() {
+        if ch.is_whitespace() {
+            if !prev_space && !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            prev_space = true;
+        } else {
+            collapsed.push(ch);
+            prev_space = false;
+        }
+    }
+    let mut result = collapsed.trim_end().to_string();
+    if result.is_empty() {
+        return None;
+    }
+    if end_byte < trimmed.len() {
+        result.push('…');
+    }
+    Some(result)
+}
+
+fn starts_with_lowercase_chars(text: &str, needle_lower: &[char]) -> bool {
+    let mut lower_iter = text.chars().flat_map(char::to_lowercase);
+    for &expected in needle_lower {
+        if lower_iter.next() != Some(expected) {
+            return false;
+        }
+    }
+    true
 }

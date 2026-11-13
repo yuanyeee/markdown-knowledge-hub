@@ -21,25 +21,32 @@ impl Tokenizer for PositionedNgram {
 }
 impl TokenStream for Stream<'_> {
     fn advance(&mut self) -> bool {
-        let Some((position, (start, _))) = self.chars.next() else {
-            return false;
-        };
-        let mut end = start;
-        let mut count = 0;
-        for c in self.text[start..].chars().take(self.width) {
-            end += c.len_utf8();
-            count += 1;
+        for (position, (start, _)) in self.chars.by_ref() {
+            let mut end = start;
+            let mut count = 0;
+            let mut has_whitespace = false;
+            for c in self.text[start..].chars().take(self.width) {
+                end += c.len_utf8();
+                count += 1;
+                if c.is_whitespace() {
+                    has_whitespace = true;
+                }
+            }
+            if count < self.width {
+                return false;
+            }
+            if has_whitespace {
+                continue;
+            }
+            self.token.position = position;
+            self.token.position_length = 1;
+            self.token.offset_from = start;
+            self.token.offset_to = end;
+            self.token.text.clear();
+            self.token.text.push_str(&self.text[start..end]);
+            return true;
         }
-        if count < self.width {
-            return false;
-        }
-        self.token.position = position;
-        self.token.position_length = 1;
-        self.token.offset_from = start;
-        self.token.offset_to = end;
-        self.token.text.clear();
-        self.token.text.push_str(&self.text[start..end]);
-        true
+        false
     }
     fn token(&self) -> &Token {
         &self.token
