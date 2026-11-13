@@ -29,6 +29,19 @@ pub struct ProjectGraph {
     pub truncated: bool,
 }
 
+fn try_shared_with_backoff(file: &File) -> std::result::Result<(), std::fs::TryLockError> {
+    for delay_ms in [2_u64, 4, 8, 16, 32, 64, 100] {
+        match file.try_lock_shared() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    file.try_lock_shared()
+}
+
 impl Hub {
     pub(crate) fn project_lock(&self, id: &str, shared: bool) -> Result<ProjectLock> {
         let mut files = vec![self.central_lock(id, shared)?];
@@ -84,7 +97,7 @@ impl Hub {
             .truncate(false)
             .open(file_path)?;
         if shared {
-            file.try_lock_shared().context("出力を更新中です")?;
+            try_shared_with_backoff(&file).context("出力を更新中です")?;
         } else {
             file.try_lock().context("出力を別の処理で使用中です")?;
         }
@@ -104,7 +117,7 @@ impl Hub {
             .truncate(false)
             .open(dir.join(format!("{id}.lock")))?;
         if shared {
-            file.try_lock_shared()
+            try_shared_with_backoff(&file)
                 .context("プロジェクトを更新中です。完了後に再試行してください")?;
         } else {
             file.try_lock()
@@ -317,5 +330,23 @@ mod tests {
         assert_eq!(hub.projects().unwrap().len(), 1);
         drop(lock);
         hub.remove("demo").unwrap();
+    }
+
+    #[test]
+    fn shared_lock_waits_for_brief_exclusive_lock_release() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        let exclusive = hub.project_lock("demo", false).unwrap();
+        let state_path = state.path().to_path_buf();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(exclusive);
+        });
+        let reader = Hub::open(&state_path).unwrap();
+        let shared = reader.project_lock("demo", true);
+        assert!(shared.is_ok());
+        releaser.join().unwrap();
     }
 }

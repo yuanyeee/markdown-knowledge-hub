@@ -49,7 +49,12 @@ impl Batch {
                 | EventKind::Create(CreateKind::Any)
         ) && !event.paths.is_empty()
             && event.paths.iter().all(|p| p.is_file());
-        if (!exact_file && !existing_file) || event.paths.is_empty() {
+        let removed_md = matches!(event.kind, EventKind::Remove(RemoveKind::Any))
+            && !event.paths.is_empty()
+            && event.paths.iter().all(|p| {
+                !p.exists() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            });
+        if (!exact_file && !existing_file && !removed_md) || event.paths.is_empty() {
             self.full = true;
             return;
         }
@@ -186,8 +191,12 @@ mod tests {
             root,
             Ok(notify::Event::new(EventKind::Remove(RemoveKind::File)).add_path(root.join("c.md"))),
         );
+        batch.add(
+            root,
+            Ok(notify::Event::new(EventKind::Remove(RemoveKind::Any)).add_path(root.join("d.md"))),
+        );
         assert!(!batch.full);
-        assert_eq!(batch.paths.len(), 3);
+        assert_eq!(batch.paths.len(), 4);
         batch.add(
             root,
             Ok(

@@ -240,6 +240,25 @@ impl Hub {
         if paths.len() > 500 {
             return self.scan_verified(id, true);
         }
+        if let Ok(root) = self.root(id)
+            && let Ok(db) = self.db(id)
+        {
+            for path in &paths {
+                if !root.join(path).exists() {
+                    let prefix = format!("{path}/%");
+                    let nested: bool = db
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM docs WHERE path LIKE ?1)",
+                            [prefix],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(false);
+                    if nested {
+                        return self.scan_verified(id, false);
+                    }
+                }
+            }
+        }
         self.scan_scope(id, true, Some(&paths), false)
     }
     pub fn rebuild(&mut self, id: &str) -> Result<ScanReport> {
