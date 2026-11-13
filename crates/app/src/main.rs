@@ -21,6 +21,11 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// OML UtilitiesのMarkdownからWikiを生成します。
+    CompileOmlWiki {
+        input: PathBuf,
+        destination: PathBuf,
+    },
     Add {
         id: String,
         name: String,
@@ -88,8 +93,14 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Command::CompileOmlWiki { input, destination } = &args.command {
+        let report = hub_core::compile_oml_wiki(input, destination)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let mut hub = Hub::open(&args.data)?;
     let value = match args.command {
+        Command::CompileOmlWiki { .. } => unreachable!(),
         Command::Add {
             id,
             name,
@@ -173,6 +184,9 @@ fn router(data: PathBuf) -> Router {
         .route("/api/projects", get(projects))
         .route("/api/search", get(search))
         .route("/api/search-page", get(search_page))
+        .route("/api/oml-catalog", get(oml_catalog))
+        .route("/api/wiki-view", get(wiki_view))
+        .route("/api/backlink-details", get(backlink_details))
         .route("/api/backlinks-page", get(backlinks_page))
         .route("/api/document", get(document))
         .route("/api/backlinks", get(backlinks))
@@ -244,9 +258,13 @@ struct LinkParameters {
     #[serde(default)]
     path: String,
     #[serde(default)]
+    fragment: String,
+    #[serde(default)]
     q: String,
     #[serde(default)]
     kind: String,
+    #[serde(default)]
+    source: String,
     #[serde(default)]
     offset: usize,
     #[serde(default = "default_link_limit")]
@@ -337,9 +355,38 @@ async fn document_links(State(data): State<PathBuf>, Query(p): Query<LinkParamet
 }
 async fn search_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
     run(data, move |h| {
-        Ok(serde_json::to_value(
-            h.search_page(&p.project, &p.q, p.offset, p.limit)?,
-        )?)
+        Ok(serde_json::to_value(h.search_page_scoped(
+            &p.project, &p.q, &p.source, p.offset, p.limit,
+        )?)?)
+    })
+    .await
+}
+async fn oml_catalog(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.oml_catalog(&p.project, &p.path)?)?)
+    })
+    .await
+}
+async fn wiki_view(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
+    run(data, move |mut hub| {
+        hub_service::call(
+            &mut hub,
+            "wiki-view",
+            &serde_json::json!({
+                "project": p.project, "path": p.path, "fragment": p.fragment
+            }),
+        )
+    })
+    .await
+}
+async fn backlink_details(
+    State(data): State<PathBuf>,
+    Query(p): Query<LinkParameters>,
+) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.backlink_details(
+            &p.project, &p.path, p.offset, p.limit,
+        )?)?)
     })
     .await
 }
@@ -407,6 +454,9 @@ mod tests {
             "/api/search-page?project=demo&q=API&limit=1",
             "/api/backlinks-page?project=demo&path=b.md&limit=1",
             "/api/link-target?project=demo&path=a.md&target=b",
+            "/api/wiki-view?project=demo&path=a.md",
+            "/api/backlink-details?project=demo&path=b.md&limit=1",
+            "/api/oml-catalog?project=demo",
             "/api/diagnostics-page?project=demo&kind=missing&limit=10",
             "/api/graph-summary?project=demo",
             "/api/stats?project=demo",

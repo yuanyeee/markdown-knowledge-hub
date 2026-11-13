@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tauri::{Manager, State};
+mod oml_import;
 struct DesktopState {
     data: Arc<PathBuf>,
     watches: Arc<Mutex<HashMap<String, hub_core::WatchHandle>>>,
@@ -49,6 +50,12 @@ async fn hub_request(
             let purpose=args.get("purpose").and_then(|v|v.as_str()).unwrap_or("フォルダー");
             return Ok(serde_json::json!({"path":rfd::FileDialog::new().set_title(format!("{purpose}を選択してください")).pick_folder().map(|p|p.to_string_lossy().into_owned())}));
         }
+        if operation=="admin/pick-md-files" {
+            return Ok(serde_json::json!({"paths":rfd::FileDialog::new().set_title("Markdownファイルを選択").add_filter("Markdown", &["md"]).pick_files()}));
+        }
+        if operation=="admin/pick-oml-files" {
+            return Ok(serde_json::json!({"paths":rfd::FileDialog::new().set_title("OMLファイルを選択").add_filter("OutSystems OML", &["oml"]).pick_files()}));
+        }
         let path=data.as_ref();
         if operation=="capabilities" {
             return Ok(serde_json::json!({"admin":true,"folder_picker":true,"desktop":true}));
@@ -66,6 +73,9 @@ async fn hub_request(
             }
         }
         let mut hub=hub_core::Hub::open(path).map_err(|e|e.to_string())?;
+        if operation=="admin/create" && let Some(files)=args.get("oml_files") {
+            return oml_import::create(&mut hub, args.clone(), files).map_err(|e|format!("{e:#}"));
+        }
         if operation=="admin/move-output" || operation=="admin/change-input" {
             let id=args.get("project").and_then(|v|v.as_str()).ok_or("プロジェクトを指定してください")?;
             // Keep the watcher control mutex until the switch and restart finish, so

@@ -582,3 +582,10 @@ mod tests {
         assert_eq!(links.iter().filter(|l| l.status == "missing").count(), 1);
     }
 }
+
+mod oml;
+pub use oml::{OmlReport, compile_oml_wiki};
+
+mod oml_elements;
+
+mod reading;

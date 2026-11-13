@@ -1,3 +1,5 @@
+import { MermaidDiagram } from './MermaidDiagram';
+import { remarkFlowTables } from './flowTables';
 import React, {
   Suspense,
   lazy,
@@ -7,7 +9,7 @@ import React, {
   useState,
 } from 'react';
 import { createRoot } from 'react-dom/client';
-import Markdown from 'react-markdown';
+import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   displayMarkdown,
@@ -33,13 +35,20 @@ type Hit = {
   snippet?: string;
 };
 
-type Doc = Hit & { markdown: string };
+type Backlink = Hit & { call: boolean };
+type Chapter = { title: string; start: number };
+type Doc = Hit & {
+  markdown: string;
+  chapters?: Chapter[] | null;
+  chapter?: number | null;
+};
 
 type Link = {
   source: string;
   target: string;
   resolved: string | null;
   status: string;
+  resolved_title?: string | null;
 };
 
 type Page<T> = {
@@ -75,6 +84,22 @@ type ProjectStats = {
   duplicate_names: number;
 };
 
+type HistoryEntry = {
+  query: string;
+  searchSource: string;
+  source: string;
+  path: string;
+  anchor: string;
+  scroll: number;
+  view: 'wiki' | 'graph';
+};
+
+type WikiView = {
+  document: Doc;
+  backlinks: Page<Backlink>;
+  links: LinkPage;
+};
+
 const DIAGNOSTIC_LABELS: Record<DiagnosticKind, string> = {
   missing: 'リンク先なし',
   ambiguous: '同名候補あり',
@@ -83,8 +108,25 @@ const DIAGNOSTIC_LABELS: Record<DiagnosticKind, string> = {
   'duplicate-names': '同名文書群',
 };
 
+const WikiPre: NonNullable<Components['pre']> = ({
+  children,
+  node: _node,
+  ...props
+}) => {
+  const code = React.Children.toArray(children)[0];
+  if (
+    React.isValidElement<{ className?: string; children?: React.ReactNode }>(
+      code,
+    ) &&
+    code.props.className === 'language-mermaid'
+  ) {
+    return <MermaidDiagram source={String(code.props.children ?? '').trim()} />;
+  }
+  return <pre {...props}>{children}</pre>;
+};
+
 function scrollElementByAnchor(rawFragment: string) {
-  if (!rawFragment) return;
+  if (!rawFragment || rawFragment === 'wiki:original') return;
   let id = rawFragment;
   try {
     id = decodeURIComponent(rawFragment);
@@ -122,8 +164,10 @@ function App() {
   const [nextHit, setNextHit] = useState<number | null>(null);
   const [nextBack, setNextBack] = useState<number | null>(null);
   const [searched, setSearched] = useState('');
+  const [searchedSource, setSearchedSource] = useState('');
+  const [scope, setScope] = useState<'project' | 'source'>('project');
   const [doc, setDoc] = useState<Doc | null>(null);
-  const [backlinks, setBacklinks] = useState<string[]>([]);
+  const [backlinks, setBacklinks] = useState<Backlink[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
   const [nextLinkOffset, setNextLinkOffset] = useState<number | null>(null);
   const [error, setError] = useState('');
@@ -136,23 +180,55 @@ function App() {
     desktop?: boolean;
   }>({ admin: false, folder_picker: false });
   const [stats, setStats] = useState<ProjectStats | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [graphExpanded, setGraphExpanded] = useState(false);
+  const leftPane = useRef<HTMLDivElement>(null);
+  const centralPane = useRef<HTMLElement>(null);
   const [anchor, setAnchor] = useState('');
   const [view, setView] = useState<'wiki' | 'graph'>('wiki');
   const [revision, setRevision] = useState(0);
-  const [history, setHistory] = useState<{ entries: string[]; index: number }>({
-    entries: [],
-    index: -1,
-  });
+  const generation = useRef(0);
+  const [history, setHistory] = useState<{
+    entries: HistoryEntry[];
+    position: number;
+  }>({ entries: [], position: -1 });
+  const pendingScroll = useRef<number | null>(null);
   const [diagKind, setDiagKind] = useState<DiagnosticKind | null>(null);
   const [diagItems, setDiagItems] = useState<DiagnosticItem[]>([]);
   const [diagNextOffset, setDiagNextOffset] = useState<number | null>(null);
-  const generation = useRef(0);
 
   useEffect(() => {
-    if (anchor && doc) {
+    if (anchor && anchor !== 'wiki:original' && doc && !doc.chapters) {
       scrollElementByAnchor(anchor);
     }
   }, [doc, anchor]);
+
+  useEffect(() => {
+    if (!anchor || anchor === 'wiki:original' || doc?.chapters) {
+      centralPane.current?.scrollTo(0, 0);
+    }
+  }, [doc, anchor]);
+
+  useEffect(() => {
+    if (!expanded && !graphExpanded) return;
+    const exit = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (graphExpanded) setGraphExpanded(false);
+      else setExpanded(false);
+    };
+    window.addEventListener('keydown', exit);
+    return () => window.removeEventListener('keydown', exit);
+  }, [expanded, graphExpanded]);
+
+  useEffect(() => {
+    if (view !== 'graph') setGraphExpanded(false);
+  }, [view]);
+
+  useEffect(() => {
+    if (pendingScroll.current === null) return;
+    centralPane.current?.scrollTo(0, pendingScroll.current);
+    pendingScroll.current = null;
+  }, [history.position, doc, view]);
 
   useEffect(() => {
     api<Project[]>('projects')
@@ -184,7 +260,12 @@ function App() {
   useEffect(() => {
     generation.current++;
     let active = true;
+    setHistory({ entries: [], position: -1 });
+    pendingScroll.current = null;
     setDoc(null);
+    setExpanded(false);
+    setGraphExpanded(false);
+    setAnchor('');
     setBacklinks([]);
     setLinks([]);
     setNextLinkOffset(null);
@@ -193,10 +274,11 @@ function App() {
     setHits([]);
     setQ('');
     setSearched('');
+    setSearchedSource('');
+    setScope('project');
     setError('');
     setStats(null);
     setView('wiki');
-    setHistory({ entries: [], index: -1 });
     setDiagKind(null);
     setDiagItems([]);
     setDiagNextOffset(null);
@@ -215,21 +297,17 @@ function App() {
           setStats(s);
           if (h.items[0]) {
             const path = h.items[0].path;
-            const [d, b, page] = await Promise.all([
-              api<Doc>('document', project, { path }),
-              api<Page<string>>('backlinks-page', project, {
-                path,
-                limit: '100',
-              }),
-              api<LinkPage>('document-links', project, { path }),
-            ]);
+            const {
+              document: d,
+              backlinks: b,
+              links: page,
+            } = await api<WikiView>('wiki-view', project, { path });
             if (active) {
               setDoc(d);
               setBacklinks(b.items);
               setNextBack(b.next_offset);
               setLinks(page.items);
               setNextLinkOffset(page.next_offset);
-              setHistory({ entries: [path], index: 0 });
             }
           }
         })
@@ -245,20 +323,114 @@ function App() {
     };
   }, [project, revision]);
 
-  async function runSearch(queryText: string) {
+  const [sources, setSources] = useState<Hit[]>([]);
+  const [source, setSource] = useState('');
+  const [sourcePages, setSourcePages] = useState<Hit[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    setSource('');
+    setSources([]);
+    if (project) {
+      void api<Hit[]>('oml-catalog', project)
+        .then((items) => {
+          if (active) setSources(items);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [project, revision]);
+
+  useEffect(() => {
+    let active = true;
+    setSourcePages([]);
+    if (project && source) {
+      void api<Hit[]>('oml-catalog', project, { path: source })
+        .then((items) => {
+          if (active) setSourcePages(items);
+        })
+        .catch((e) => {
+          if (active) setError(String(e));
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [project, source, revision]);
+
+  const sourceTitles = useMemo(
+    () => new Map(sources.map((item) => [item.path, item.title])),
+    [sources],
+  );
+
+  function referenceTitle(path: string, title: string) {
+    const slash = path.indexOf('/');
+    const original =
+      slash < 0 ? undefined : sourceTitles.get(path.slice(0, slash) + '.md');
+    return original ? `（${original}）${title}` : title;
+  }
+
+  function sourceFor(path: string) {
+    const folder = path.split('/')[0];
+    const match = sources.find(
+      (item) => item.path === path || item.path === folder + '.md',
+    );
+    return match?.path ?? '';
+  }
+
+  function capture(): HistoryEntry {
+    return {
+      query: searched,
+      searchSource: searchedSource,
+      source,
+      path: doc?.path ?? '',
+      anchor,
+      scroll: centralPane.current?.scrollTop ?? 0,
+      view,
+    };
+  }
+
+  function record(before: HistoryEntry, after: HistoryEntry) {
+    setHistory((previous) => {
+      const entries = previous.entries.slice(0, previous.position);
+      entries.push(before, after);
+      const bounded = entries.slice(-60);
+      return { entries: bounded, position: bounded.length - 1 };
+    });
+  }
+
+  function applyWiki(wiki: WikiView | null) {
+    setDoc(wiki?.document ?? null);
+    setBacklinks(wiki?.backlinks.items ?? []);
+    setNextBack(wiki?.backlinks.next_offset ?? null);
+    setLinks(wiki?.links.items ?? []);
+    setNextLinkOffset(wiki?.links.next_offset ?? null);
+  }
+
+  async function search(clear = false) {
+    if (busy) return;
+    const before = capture();
+    const query = clear ? '' : q.trim();
+    const searchSource = query && scope === 'source' ? source : '';
     const current = ++generation.current;
     setError('');
     setBusy(true);
     try {
       const found = await api<Page<Hit>>('search-page', project, {
-        q: queryText,
+        q: query,
+        source: searchSource,
         limit: '50',
       });
-      if (current === generation.current) {
-        setHits(found.items);
-        setNextHit(found.next_offset);
-        setSearched(queryText);
-      }
+      if (current !== generation.current) return;
+      setHits(found.items);
+      setNextHit(found.next_offset);
+      setSearched(query);
+      setSearchedSource(searchSource);
+      setQ(query);
+      record(before, { ...before, query, searchSource });
+      leftPane.current?.scrollTo(0, 0);
     } catch (e) {
       if (current === generation.current) setError(String(e));
     } finally {
@@ -266,17 +438,27 @@ function App() {
     }
   }
 
-  function jumpToSameDocAnchor(fragment: string) {
-    setAnchor(fragment);
-    setView('wiki');
-    scrollElementByAnchor(fragment);
-  }
-
-  async function open(path: string, fragment = '', recordHistory = true) {
+  async function open(path: string, fragment = '') {
     if (busy) return;
-    if (doc && doc.path === path && view === 'wiki') {
-      if (fragment) {
-        jumpToSameDocAnchor(fragment);
+    const before = capture();
+    const nextSource = sourceFor(path);
+    const after: HistoryEntry = {
+      ...before,
+      source: nextSource,
+      path,
+      anchor: fragment,
+      scroll: 0,
+      view: 'wiki',
+    };
+    if (path === doc?.path && !doc.chapters) {
+      if (fragment !== anchor || view !== 'wiki') record(before, after);
+      setView('wiki');
+      setAnchor(fragment);
+      setSource(nextSource);
+      if (!fragment) {
+        centralPane.current?.scrollTo(0, 0);
+      } else {
+        scrollElementByAnchor(fragment);
       }
       return;
     }
@@ -284,28 +466,16 @@ function App() {
     setError('');
     setBusy(true);
     try {
-      const [d, b, page] = await Promise.all([
-        api<Doc>('document', project, { path }),
-        api<Page<string>>('backlinks-page', project, { path, limit: '100' }),
-        api<LinkPage>('document-links', project, { path }),
-      ]);
-      if (current === generation.current) {
-        setDoc(d);
-        setBacklinks(b.items);
-        setNextBack(b.next_offset);
-        setLinks(page.items);
-        setNextLinkOffset(page.next_offset);
-        setAnchor(fragment);
-        setView('wiki');
-        if (recordHistory) {
-          setHistory((prev) => {
-            const base = prev.entries.slice(0, prev.index + 1);
-            if (base[base.length - 1] === path) return prev;
-            const nextEntries = [...base, path].slice(-50);
-            return { entries: nextEntries, index: nextEntries.length - 1 };
-          });
-        }
-      }
+      const wiki = await api<WikiView>('wiki-view', project, {
+        path,
+        fragment,
+      });
+      if (current !== generation.current) return;
+      applyWiki(wiki);
+      setSource(nextSource);
+      setAnchor(fragment);
+      setView('wiki');
+      record(before, after);
     } catch (e) {
       if (current === generation.current) setError(String(e));
     } finally {
@@ -313,12 +483,52 @@ function App() {
     }
   }
 
-  async function stepHistory(delta: -1 | 1) {
-    const nextIdx = history.index + delta;
-    if (busy || nextIdx < 0 || nextIdx >= history.entries.length) return;
-    const targetPath = history.entries[nextIdx];
-    setHistory((prev) => ({ ...prev, index: nextIdx }));
-    await open(targetPath, '', false);
+  async function moveHistory(delta: number) {
+    const position = history.position + delta;
+    const entry = history.entries[position];
+    if (busy || !entry) return;
+    const before = capture();
+    const current = ++generation.current;
+    setError('');
+    setBusy(true);
+    try {
+      const [found, wiki] = await Promise.all([
+        entry.query === searched && entry.searchSource === searchedSource
+          ? null
+          : api<Page<Hit>>('search-page', project, {
+              q: entry.query,
+              source: entry.searchSource,
+              limit: '50',
+            }),
+        entry.path
+          ? api<WikiView>('wiki-view', project, {
+              path: entry.path,
+              fragment: entry.anchor,
+            })
+          : null,
+      ]);
+      if (current !== generation.current) return;
+      if (found) {
+        setHits(found.items);
+        setNextHit(found.next_offset);
+      }
+      setQ(entry.query);
+      setSearched(entry.query);
+      setSearchedSource(entry.searchSource);
+      setScope(entry.searchSource ? 'source' : 'project');
+      setSource(entry.source);
+      applyWiki(wiki);
+      setAnchor(entry.anchor);
+      setView(entry.view);
+      pendingScroll.current = entry.scroll;
+      const entries = history.entries.slice();
+      entries[history.position] = before;
+      setHistory({ entries, position });
+    } catch (e) {
+      if (current === generation.current) setError(String(e));
+    } finally {
+      if (current === generation.current) setBusy(false);
+    }
   }
 
   async function toggleDiagnostics(kind: DiagnosticKind) {
@@ -407,6 +617,7 @@ function App() {
       if (kind === 'hits') {
         const page = await api<Page<Hit>>('search-page', project, {
           q: searched,
+          source: searchedSource,
           offset: String(offset),
           limit: '50',
         });
@@ -415,7 +626,7 @@ function App() {
           setNextHit(page.next_offset);
         }
       } else if (doc) {
-        const page = await api<Page<string>>('backlinks-page', project, {
+        const page = await api<Page<Backlink>>('backlink-details', project, {
           path: doc.path,
           offset: String(offset),
           limit: '100',
@@ -434,8 +645,8 @@ function App() {
 
   async function navigate(target: string) {
     if (!doc || busy) return;
-    if (target.startsWith('#')) {
-      jumpToSameDocAnchor(target.slice(1));
+    if (target.startsWith('#') && !doc.chapters) {
+      await open(doc.path, target.slice(1));
       return;
     }
     const current = generation.current;
@@ -446,8 +657,7 @@ function App() {
       });
       if (current !== generation.current) return;
       if (link?.resolved) {
-        const fragment = link.target.split('#').slice(1).join('#');
-        await open(link.resolved, fragment);
+        await open(link.resolved, link.target.split('#').slice(1).join('#'));
       } else {
         setError(
           link?.status === 'missing-heading'
@@ -460,14 +670,126 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    const pane = leftPane.current;
+    const selected = pane?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!pane || !selected) return;
+    const bounds = pane.getBoundingClientRect();
+    const row = selected.getBoundingClientRect();
+    if (row.top < bounds.top) pane.scrollTop += row.top - bounds.top;
+    else if (row.bottom > bounds.bottom) {
+      pane.scrollTop += row.bottom - bounds.bottom;
+    }
+  }, [doc?.path, sourcePages, hits, expanded]);
+
+  const listed = searched ? hits : source ? sourcePages : hits;
+  const visibleHits =
+    doc && !searched && !source && !listed.some((hit) => hit.path === doc.path)
+      ? [doc, ...listed]
+      : listed;
+
+  const groups = new Map<string, Hit[]>();
+  for (const hit of visibleHits) {
+    const kind = searched
+      ? '検索結果'
+      : source
+        ? hit.path === source
+          ? '元仕様書'
+          : hit.title.split(' · ')[0]
+        : '文書';
+    const items = groups.get(kind) ?? [];
+    items.push(hit);
+    groups.set(kind, items);
+  }
+
+  const elementContents = new Map<string, Hit[]>();
+  if (doc && !anchor && sourceTitles.has(doc.path)) {
+    const folder = doc.path.slice(0, -3) + '/';
+    for (const hit of sourcePages) {
+      if (!hit.path.startsWith(folder)) continue;
+      const kind = hit.title.split(' · ')[0];
+      const items = elementContents.get(kind) ?? [];
+      items.push(hit);
+      elementContents.set(kind, items);
+    }
+  }
+  const showElementContents = elementContents.size > 0;
   const outgoing = links.filter((l) => l.source === doc?.path);
   const headings = useMemo(
-    () => (doc ? extractHeadings(doc.markdown) : []),
-    [doc],
+    () =>
+      doc && !doc.chapters && !showElementContents
+        ? extractHeadings(doc.markdown)
+        : [],
+    [doc, showElementContents],
   );
-  const canGoBack = history.index > 0;
-  const canGoForward =
-    history.index >= 0 && history.index < history.entries.length - 1;
+
+  const wikiNavigation = useRef({ open, navigate });
+  wikiNavigation.current = { open, navigate };
+
+  const wikiBody = useMemo(() => {
+    if (!doc || showElementContents || (doc.chapters && doc.chapter == null)) {
+      return null;
+    }
+    const pageOutgoing = links.filter((link) => link.source === doc.path);
+    return (
+      <Markdown
+        skipHtml
+        remarkPlugins={[remarkGfm, remarkWiki, remarkFlowTables]}
+        rehypePlugins={[rehypeHeadingIds]}
+        components={{
+          pre: WikiPre,
+          a: ({ href, children }) => {
+            const link = pageOutgoing.find((l) => sameTarget(href, l.target));
+            if (link?.resolved) {
+              return (
+                <button
+                  type="button"
+                  className="inline"
+                  onClick={() =>
+                    void wikiNavigation.current.open(
+                      link.resolved!,
+                      link.target.split('#').slice(1).join('#'),
+                    )
+                  }
+                >
+                  {children}
+                </button>
+              );
+            }
+            if (
+              href?.startsWith('https://') ||
+              href?.startsWith('http://')
+            ) {
+              return (
+                <a href={href} target="_blank" rel="noreferrer">
+                  {children}
+                </a>
+              );
+            }
+            if (href && !link) {
+              return (
+                <button
+                  type="button"
+                  className="inline"
+                  onClick={() => void wikiNavigation.current.navigate(href)}
+                >
+                  {children}
+                </button>
+              );
+            }
+            return (
+              <span title="リンク先または見出しがありません">{children}</span>
+            );
+          },
+          img: ({ alt }) => (
+            <span className="image-placeholder">[画像: {alt || '画像'}]</span>
+          ),
+        }}
+      >
+        {displayMarkdown(doc.markdown)}
+      </Markdown>
+    );
+  }, [doc, links, showElementContents]);
 
   function renderDiagnosticStat(
     kind: DiagnosticKind,
@@ -497,7 +819,9 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div
+      className={`app ${expanded ? 'wiki-expanded' : ''} ${graphExpanded && view === 'graph' ? 'graph-expanded' : ''}`}
+    >
       <header>
         <div className="brand">
           MK<span>H</span>
@@ -512,7 +836,7 @@ function App() {
         <span className="badge">原本Markdownは読み取り専用</span>
       </header>
 
-      <section className="toolbar" aria-label="検索条件">
+      <section className="toolbar" aria-label="プロジェクト選択">
         <label>
           プロジェクト
           <select
@@ -530,55 +854,25 @@ function App() {
             ))}
           </select>
         </label>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void runSearch(q);
-          }}
-        >
-          <label htmlFor="query">全文検索</label>
-          <div className="search">
-            <input
-              id="query"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="キーワードを入力（日本語・中文・English）"
-            />
-            {(q || searched) && (
-              <button
-                type="button"
-                className="secondary-btn"
-                disabled={!project || busy}
-                onClick={() => {
-                  setQ('');
-                  if (searched) void runSearch('');
-                }}
-              >
-                クリア
-              </button>
-            )}
-            <button type="submit" disabled={!project || busy}>
-              検索
-            </button>
-          </div>
-        </form>
       </section>
 
-      <ProjectManager
-        current={projects.find((p) => p.id === project)}
-        enabled={capabilities.admin}
-        folderPicker={capabilities.folder_picker}
-        onChanged={refreshProjects}
-        onBusy={setAdminBusy}
-      />
-
-      {capabilities.desktop && project && (
-        <WatchManager
-          key={project}
-          project={project}
-          onRefresh={() => setRevision((v) => v + 1)}
+      <details className="workspace-settings">
+        <summary>プロジェクト管理・監視</summary>
+        <ProjectManager
+          current={projects.find((p) => p.id === project)}
+          enabled={capabilities.admin}
+          folderPicker={capabilities.folder_picker}
+          onChanged={refreshProjects}
+          onBusy={setAdminBusy}
         />
-      )}
+        {capabilities.desktop && project && (
+          <WatchManager
+            key={project}
+            project={project}
+            onRefresh={() => setRevision((v) => v + 1)}
+          />
+        )}
+      </details>
 
       {stats && (
         <div className="project-stats">
@@ -630,7 +924,7 @@ function App() {
                 disabled={busy}
                 onClick={() => void open(item.path)}
               >
-                <strong>{item.title}</strong>
+                <strong>{referenceTitle(item.path, item.title)}</strong>
                 <span>
                   {item.path}
                   {item.detail ? ` — 対象: ${item.detail}` : ''}
@@ -651,24 +945,77 @@ function App() {
       )}
 
       {project && (
-        <div className="view-tabs" role="tablist" aria-label="表示切替">
+        <div className="view-tabs" aria-label="Wiki閲覧操作">
           <button
-            role="tab"
-            aria-selected={view === 'wiki'}
-            onClick={() => setView('wiki')}
+            type="button"
+            disabled={busy || history.position <= 0}
+            onClick={() => void moveHistory(-1)}
           >
-            Wiki
+            ‹ 戻る
           </button>
           <button
-            role="tab"
-            aria-selected={view === 'graph'}
-            onClick={() => setView('graph')}
+            type="button"
+            disabled={busy || history.position >= history.entries.length - 1}
+            onClick={() => void moveHistory(1)}
           >
-            リンク図
+            進む ›
           </button>
+          <div className="wiki-tabs" role="tablist" aria-label="表示切替">
+            <button
+              role="tab"
+              aria-selected={view === 'wiki'}
+              onClick={() => setView('wiki')}
+            >
+              Wiki
+            </button>
+            <button
+              role="tab"
+              aria-selected={view === 'graph'}
+              onClick={() => setView('graph')}
+            >
+              リンク図
+            </button>
+          </div>
           {doc && view === 'graph' && (
             <button onClick={() => setDoc(null)}>プロジェクト全体を見る</button>
           )}
+          <form
+            className="wiki-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void search();
+            }}
+          >
+            <input
+              aria-label="全文検索"
+              value={q}
+              onChange={(event) => setQ(event.target.value)}
+              placeholder="Wikiを全文検索"
+            />
+            <select
+              aria-label="検索範囲"
+              value={source ? scope : 'project'}
+              onChange={(event) =>
+                setScope(event.target.value as typeof scope)
+              }
+            >
+              <option value="project">プロジェクト全体</option>
+              <option value="source" disabled={!source}>
+                選択中の元仕様書
+              </option>
+            </select>
+            <button type="submit" disabled={busy || !q.trim()}>
+              検索
+            </button>
+          </form>
+          <button
+            className="expand-workspace"
+            type="button"
+            aria-pressed={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? '通常表示に戻す（Esc）' : '閲覧エリアを全画面に拡大'}
+          </button>
         </div>
       )}
 
@@ -685,142 +1032,218 @@ function App() {
       )}
 
       <div className="workspace" aria-busy={busy}>
-        <nav aria-label="文書一覧">
-          <h2>
-            {searched ? '検索結果' : '文書'} <small>{hits.length}件</small>
-          </h2>
-          {hits.map((h) => (
-            <button
-              disabled={busy}
-              className={`hit ${doc?.path === h.path ? 'selected' : ''}`}
-              key={h.path}
-              onClick={() => void open(h.path)}
-            >
-              <strong>{h.title}</strong>
-              <span>{h.path}</span>
-              {h.snippet && (
-                <HighlightedSnippet text={h.snippet} query={searched} />
-              )}
-            </button>
-          ))}
-          {nextHit !== null && (
-            <button
-              className="more-btn"
-              disabled={busy}
-              onClick={() => void more('hits')}
-            >
-              文書をさらに読み込む
-            </button>
+        <nav className="source-navigation" aria-label="文書一覧">
+          {sources.length > 0 && (
+            <label className="source-filter">
+              元仕様書
+              <select
+                aria-label="元仕様書"
+                value={source}
+                disabled={busy}
+                onChange={(e) => {
+                  const path = e.target.value;
+                  if (path) void open(path);
+                  else setSource('');
+                }}
+              >
+                <option value="">すべての仕様書</option>
+                {sources.map((item) => (
+                  <option key={item.path} value={item.path}>
+                    {item.title}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
-          {project && !hits.length && <p>該当する文書がありません。</p>}
+          {searched && (
+            <div className="search-summary">
+              <span>
+                「{searched}」 ·{' '}
+                {searchedSource
+                  ? (sourceTitles.get(searchedSource) ?? '元仕様書')
+                  : 'プロジェクト全体'}
+              </span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void search(true)}
+              >
+                検索結果を閉じる
+              </button>
+            </div>
+          )}
+          <div className="source-list" ref={leftPane}>
+            {[...groups].map(([kind, items]) => (
+              <section key={kind}>
+                <h2>
+                  {kind} <small>{items.length}件</small>
+                </h2>
+                {items.map((hit) => (
+                  <button
+                    disabled={busy}
+                    className={`hit ${doc?.path === hit.path ? 'selected' : ''}`}
+                    key={hit.path}
+                    aria-current={doc?.path === hit.path ? 'page' : undefined}
+                    onClick={() => void open(hit.path)}
+                  >
+                    <strong>
+                      {source && !searched && hit.path !== source
+                        ? hit.title.split(' · ').slice(1).join(' · ') ||
+                          hit.title
+                        : hit.title}
+                    </strong>
+                    {(!source || searched) && <span>{hit.path}</span>}
+                    {searched && hit.snippet && (
+                      <HighlightedSnippet
+                        text={hit.snippet}
+                        query={searched}
+                      />
+                    )}
+                  </button>
+                ))}
+              </section>
+            ))}
+            {(searched || !source) && nextHit !== null && (
+              <button
+                className="more-btn"
+                disabled={busy}
+                onClick={() => void more('hits')}
+              >
+                文書をさらに読み込む
+              </button>
+            )}
+            {project && !visibleHits.length && <p>該当する文書がありません。</p>}
+          </div>
         </nav>
 
-        <main>
+        <main ref={centralPane}>
           {view === 'graph' && project ? (
             <Suspense fallback={<p>リンク図を準備しています…</p>}>
               <GraphView
                 key={`${project}-${revision}`}
                 project={project}
                 center={doc?.path}
+                expanded={graphExpanded}
+                onToggleExpand={() => setGraphExpanded((value) => !value)}
                 onOpen={(path) => void open(path)}
               />
             </Suspense>
           ) : doc ? (
             <>
-              <div className="doc-header">
-                <div className="docpath">{doc.path}</div>
-                {history.entries.length > 1 && (
-                  <div className="history-nav" aria-label="閲覧履歴">
-                    <button
-                      type="button"
-                      disabled={busy || !canGoBack}
-                      onClick={() => void stepHistory(-1)}
-                      title="前の文書へ戻る"
+              <div className="docpath">{doc.path}</div>
+              {showElementContents ? (
+                <section aria-label="要素別Wikiの目次">
+                  <h1>{doc.title}</h1>
+                  <h2>要素別Wikiの目次</h2>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void open(doc.path, 'wiki:original')}
+                  >
+                    元仕様書を読む
+                  </button>
+                  {[...elementContents].map(([kind, items]) => (
+                    <section key={kind}>
+                      <h3>
+                        {kind} <small>{items.length}件</small>
+                      </h3>
+                      <ul>
+                        {items.map((item) => (
+                          <li key={item.path}>
+                            <button
+                              className="inline"
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void open(item.path)}
+                            >
+                              {item.title.slice(kind.length + 3) || item.title}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </section>
+              ) : (
+                sourceTitles.has(doc.path) &&
+                anchor && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void open(doc.path)}
+                  >
+                    要素別Wikiの目次へ
+                  </button>
+                )
+              )}
+
+              {doc.chapters && !showElementContents && (
+                <section className="chapter-reader" aria-label="元仕様書の章">
+                  <h2>{doc.title} の目次</h2>
+                  <label>
+                    章を選択{' '}
+                    <select
+                      aria-label="章を選択"
+                      disabled={busy}
+                      value={doc.chapter == null ? '' : String(doc.chapter)}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        const chapter =
+                          value === ''
+                            ? undefined
+                            : doc.chapters?.[Number(value)];
+                        void open(
+                          doc.path,
+                          chapter
+                            ? `chapter:${chapter.start}`
+                            : 'wiki:original',
+                        );
+                      }}
                     >
-                      ← 戻る
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy || !canGoForward}
-                      onClick={() => void stepHistory(1)}
-                      title="次の文書へ進む"
-                    >
-                      進む →
-                    </button>
-                  </div>
-                )}
-              </div>
-              <Markdown
-                skipHtml
-                remarkPlugins={[remarkGfm, remarkWiki]}
-                rehypePlugins={[rehypeHeadingIds]}
-                components={{
-                  a: ({ href, children }) => {
-                    if (href?.startsWith('#')) {
-                      return (
-                        <button
-                          type="button"
-                          className="inline"
-                          onClick={() => jumpToSameDocAnchor(href.slice(1))}
-                        >
-                          {children}
-                        </button>
-                      );
-                    }
-                    const link = outgoing.find((l) =>
-                      sameTarget(href, l.target),
-                    );
-                    if (link?.resolved) {
-                      const fragment = link.target
-                        .split('#')
-                        .slice(1)
-                        .join('#');
-                      return (
-                        <button
-                          type="button"
-                          className="inline"
-                          onClick={() => void open(link.resolved!, fragment)}
-                        >
-                          {children}
-                        </button>
-                      );
-                    }
-                    if (
-                      href?.startsWith('https://') ||
-                      href?.startsWith('http://')
-                    ) {
-                      return (
-                        <a href={href} target="_blank" rel="noreferrer">
-                          {children}
-                        </a>
-                      );
-                    }
-                    if (href && !link) {
-                      return (
-                        <button
-                          type="button"
-                          className="inline"
-                          onClick={() => void navigate(href)}
-                        >
-                          {children}
-                        </button>
-                      );
-                    }
-                    return (
-                      <span title="リンク先または見出しがありません">
-                        {children}
-                      </span>
-                    );
-                  },
-                  img: ({ alt }) => (
-                    <span className="image-placeholder">
-                      [画像: {alt || '画像'}]
-                    </span>
-                  ),
-                }}
-              >
-                {displayMarkdown(doc.markdown)}
-              </Markdown>
+                      <option value="">目次のみ</option>
+                      {doc.chapters.map((chapter, index) => (
+                        <option key={chapter.start} value={index}>
+                          {chapter.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {doc.chapter == null ? (
+                    <p className="hint">
+                      章を選ぶと、その部分の本文を表示します。
+                    </p>
+                  ) : (
+                    <div className="chapter-actions">
+                      <button
+                        type="button"
+                        disabled={busy || doc.chapter === 0}
+                        onClick={() =>
+                          void open(
+                            doc.path,
+                            `chapter:${doc.chapters![doc.chapter! - 1].start}`,
+                          )
+                        }
+                      >
+                        前の章
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || doc.chapter === doc.chapters.length - 1}
+                        onClick={() =>
+                          void open(
+                            doc.path,
+                            `chapter:${doc.chapters![doc.chapter! + 1].start}`,
+                          )
+                        }
+                      >
+                        次の章
+                      </button>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {wikiBody}
             </>
           ) : (
             <div className="empty">
@@ -833,9 +1256,9 @@ function App() {
 
         <aside>
           {headings.length >= 2 && (
-            <details open className="toc">
+            <details className="toc">
               <summary>
-                目次 <small>{headings.length}見出し</small>
+                ページ内見出し <small>{headings.length}件</small>
               </summary>
               <div className="toc-list">
                 {headings.map((h) => (
@@ -843,7 +1266,7 @@ function App() {
                     key={h.id}
                     type="button"
                     className={`toc-item level-${Math.min(h.level, 4)}`}
-                    onClick={() => jumpToSameDocAnchor(h.id)}
+                    onClick={() => doc && void open(doc.path, h.id)}
                   >
                     {h.text}
                   </button>
@@ -851,15 +1274,19 @@ function App() {
               </div>
             </details>
           )}
-          <h2>Backlinks</h2>
-          <p className="hint">この文書への参照</p>
-          {backlinks.map((p) => (
+
+          <h2>参照元</h2>
+          {backlinks.map((item) => (
             <button
               className="hit"
-              key={p}
-              onClick={() => void open(p)}
+              key={item.path}
+              disabled={busy}
+              onClick={() => void open(item.path)}
             >
-              {p}
+              <strong>{referenceTitle(item.path, item.title)}</strong>
+              <span>
+                {item.call ? '呼び出し元' : '文書参照'} · {item.path}
+              </span>
             </button>
           ))}
           {nextBack !== null && (
@@ -873,49 +1300,58 @@ function App() {
           )}
           {!backlinks.length && <p>参照元はありません。</p>}
 
-          <h2>出リンク</h2>
-          {outgoing.map((l, i) => (
-            <div className="link" key={i}>
-              {l.resolved ? (
-                <button
-                  type="button"
-                  className="inline"
-                  onClick={() =>
-                    void open(
-                      l.resolved!,
-                      l.target.split('#').slice(1).join('#'),
-                    )
-                  }
-                >
-                  {l.target}
-                </button>
-              ) : (
-                <span>
-                  {l.target}
-                  <small>
-                    {' '}
-                    {l.status === 'ambiguous'
-                      ? '同名候補あり'
-                      : l.status === 'missing-heading'
-                        ? '見出しなし'
-                        : 'リンク先なし'}
-                  </small>
-                </span>
-              )}
-            </div>
-          ))}
+          <h2>参照先</h2>
+          {outgoing
+            .filter((link) => link.resolved !== doc?.path)
+            .map((link, index) => (
+              <div className="link" key={index}>
+                {link.resolved ? (
+                  <button
+                    className="hit"
+                    disabled={busy}
+                    onClick={() =>
+                      void open(
+                        link.resolved!,
+                        link.target.split('#').slice(1).join('#'),
+                      )
+                    }
+                  >
+                    <strong>
+                      {referenceTitle(
+                        link.resolved,
+                        link.resolved_title ?? link.target,
+                      )}
+                    </strong>
+                    <span>
+                      {link.target.endsWith('#oml-call')
+                        ? '呼び出し先'
+                        : '文書参照'}
+                    </span>
+                  </button>
+                ) : (
+                  <span>
+                    {link.target}
+                    <small>
+                      {' '}
+                      {link.status === 'ambiguous'
+                        ? '同名候補あり'
+                        : link.status === 'missing-heading'
+                          ? '見出しなし'
+                          : 'リンク先なし'}
+                    </small>
+                  </span>
+                )}
+              </div>
+            ))}
           {nextLinkOffset !== null && (
             <button
               className="more-btn"
               disabled={busy}
               onClick={() => void moreLinks()}
             >
-              出リンクをさらに読み込む
+              参照先をさらに読み込む
             </button>
           )}
-          <p className="hint">
-            出リンクは文書ごとに100件ずつ取得します。リンク図タブで文書間の関係を確認できます。
-          </p>
         </aside>
       </div>
 

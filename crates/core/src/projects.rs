@@ -19,6 +19,7 @@ pub struct ProjectStats {
 }
 #[derive(Debug, Serialize)]
 pub struct GraphEdge {
+    pub call: bool,
     pub source: String,
     pub target: String,
 }
@@ -239,7 +240,15 @@ impl Hub {
         for path in &all_paths {
             *groups.entry(folder_at_depth(path, 1)).or_default() += 1;
         }
-        let depth = if groups.len() == 1 && !groups.contains_key("/") {
+        let mut statement = db.prepare(
+            "SELECT path, title FROM docs WHERE path GLOB 'oml-*.md' AND instr(path, '/') = 0",
+        )?;
+        let source_titles = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+        let depth = if groups.len() == 1 && !groups.contains_key("/") && source_titles.is_empty() {
             let mut deeper = std::collections::BTreeMap::<String, usize>::new();
             for path in &all_paths {
                 *deeper.entry(folder_at_depth(path, 2)).or_default() += 1;
@@ -257,10 +266,19 @@ impl Hub {
         let mut nodes = groups
             .iter()
             .take(200)
-            .map(|(name, count)| SearchHit {
-                path: name.clone(),
-                title: format!("{name} ({count}文書)"),
-                snippet: None,
+            .map(|(name, count)| {
+                let label = if name == "/" {
+                    "ルート"
+                } else {
+                    source_titles
+                        .get(&format!("{name}.md"))
+                        .map_or(name.as_str(), String::as_str)
+                };
+                SearchHit {
+                    path: name.clone(),
+                    title: format!("{label} ({count}文書)"),
+                    snippet: None,
+                }
             })
             .collect::<Vec<_>>();
         let selected = nodes.iter().map(|n| n.path.clone()).collect::<HashSet<_>>();
@@ -297,7 +315,11 @@ impl Hub {
         }
         let edges = keys
             .into_iter()
-            .map(|(source, target)| GraphEdge { source, target })
+            .map(|(source, target)| GraphEdge {
+                source,
+                target,
+                call: false,
+            })
             .collect();
         Ok(ProjectGraph {
             nodes,
@@ -395,12 +417,20 @@ impl Hub {
         for chunk in paths.chunks(250) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let mut s = db.prepare(&format!(
-                "SELECT DISTINCT source, resolved FROM links WHERE resolved IS NOT NULL AND source IN ({placeholders}) ORDER BY source, resolved"
+                "SELECT source, resolved, MAX(target LIKE '%#oml-call')
+                 FROM links
+                 WHERE resolved IS NOT NULL AND resolved <> source AND source IN ({placeholders})
+                 GROUP BY source, resolved
+                 ORDER BY source, resolved"
             ))?;
             for row in s.query_map(rusqlite::params_from_iter(chunk), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
             })? {
-                let (source, target) = row?;
+                let (source, target, call) = row?;
                 let count = per_source_count.entry(source.clone()).or_default();
                 *count += 1;
                 if *count > 1000 {
@@ -412,7 +442,11 @@ impl Hub {
                     if edges.len() == 1000 {
                         truncated = true;
                     } else {
-                        edges.push(GraphEdge { source, target });
+                        edges.push(GraphEdge {
+                            source,
+                            target,
+                            call,
+                        });
                     }
                 }
             }

@@ -26,11 +26,31 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             text(args, "path")?,
             text(args, "target")?,
         )?)?,
-        "search-page" => serde_json::to_value(hub.search_page(
+        "search-page" => serde_json::to_value(hub.search_page_scoped(
             text(args, "project")?,
             args.get("q").and_then(Value::as_str).unwrap_or(""),
+            args.get("source").and_then(Value::as_str).unwrap_or(""),
             number(args, "offset", 0)?,
             number(args, "limit", 50)?,
+        )?)?,
+        "oml-catalog" => serde_json::to_value(hub.oml_catalog(
+            text(args, "project")?,
+            args.get("path").and_then(Value::as_str).unwrap_or(""),
+        )?)?,
+        "wiki-view" => {
+            let project = text(args, "project")?;
+            let path = text(args, "path")?;
+            json!({
+                "document": hub.reading_document(project, path, args.get("fragment").and_then(Value::as_str).unwrap_or(""))?,
+                "backlinks": hub.backlink_details(project, path, 0, 100)?,
+                "links": hub.links_page(project, path, 0, 100)?,
+            })
+        }
+        "backlink-details" => serde_json::to_value(hub.backlink_details(
+            text(args, "project")?,
+            text(args, "path")?,
+            number(args, "offset", 0)?,
+            number(args, "limit", 100)?,
         )?)?,
         "backlinks-page" => serde_json::to_value(hub.backlinks_page(
             text(args, "project")?,
@@ -73,15 +93,26 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
         )?,
         "admin/create" => {
             let id = text(args, "id")?;
-            if let Some(output) = args.get("output").and_then(Value::as_str) {
-                hub.register_with_output(
+            let original = Path::new(text(args, "root")?);
+            let output = args.get("output").and_then(Value::as_str).map(Path::new);
+            let generated = if let Some(files) = args.get("md_files") {
+                let files: Vec<std::path::PathBuf> = serde_json::from_value(files.clone())?;
+                Some(hub.prepare_markdown_selection(
                     id,
-                    text(args, "name")?,
-                    Path::new(text(args, "root")?),
-                    Path::new(output),
-                )?;
+                    &files,
+                    output.context("出力の親フォルダーを選択してください")?,
+                )?)
+            } else if args.get("oml").and_then(Value::as_bool) == Some(true) {
+                let parent = output.context("出力の親フォルダーを選択してください")?;
+                Some(hub.prepare_oml_wiki(id, original, parent)?)
             } else {
-                hub.register(id, text(args, "name")?, Path::new(text(args, "root")?))?;
+                None
+            };
+            let root = generated.as_deref().unwrap_or(original);
+            if let Some(output) = output {
+                hub.register_with_output(id, text(args, "name")?, root, output)?;
+            } else {
+                hub.register(id, text(args, "name")?, root)?;
             }
             match hub.scan(id) {
                 Ok(report) => json!({"id":id,"report":report}),
@@ -121,6 +152,61 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn selected_markdown_keeps_relative_links_and_excludes_unselected_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("source");
+        let output = temp.path().join("output");
+        std::fs::create_dir_all(input.join("sub"))?;
+        std::fs::create_dir(&output)?;
+        let first = input.join("a.md");
+        let second = input.join("sub/b.md");
+        std::fs::write(&first, "# Alpha\n[Beta](sub/b.md)")?;
+        std::fs::write(&second, "# Beta")?;
+        std::fs::write(input.join("excluded.md"), "# Excluded")?;
+        let mut hub = Hub::open(&temp.path().join("settings"))?;
+        call(
+            &mut hub,
+            "admin/create",
+            &json!({
+                "id": "selected", "name": "Selection", "root": "", "output": output,
+                "md_files": [first, second]
+            }),
+        )?;
+        assert_eq!(hub.backlinks("selected", "sub/b.md")?, vec!["a.md"]);
+        assert!(hub.search("selected", "Excluded")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn oml_creation_registers_the_generated_wiki() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let originals = temp.path().join("originals");
+        let output = temp.path().join("output");
+        std::fs::create_dir(&originals)?;
+        std::fs::create_dir(&output)?;
+        let source = "# Orders モジュール仕様書";
+        std::fs::write(originals.join("orders.md"), source)?;
+        let mut hub = Hub::open(&temp.path().join("settings"))?;
+        call(
+            &mut hub,
+            "admin/create",
+            &json!({
+                "id": "oml", "name": "OML Wiki", "root": originals, "output": output, "oml": true
+            }),
+        )?;
+        assert!(
+            hub.search("oml", "Orders")?
+                .iter()
+                .any(|hit| hit.title == "Orders")
+        );
+        assert_eq!(
+            std::fs::read_to_string(originals.join("orders.md"))?,
+            source
+        );
+        Ok(())
+    }
+
     #[test]
     fn external_output_lifecycle_keeps_cached_documents_without_source() {
         let source = tempfile::tempdir().unwrap();
