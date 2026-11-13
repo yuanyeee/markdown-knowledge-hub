@@ -1,3 +1,4 @@
+import { isTauri } from '@tauri-apps/api/core';
 import { useEffect, useState } from 'react';
 import { read, write as sendCommand } from './transport';
 import { ConfirmRemove } from './ConfirmRemove';
@@ -17,6 +18,8 @@ type Retired = {
   path: string;
 };
 
+type ProjectKind = 'markdown' | 'oml' | 'files' | 'md-files';
+
 type Props = {
   current?: Project;
   enabled: boolean;
@@ -32,6 +35,10 @@ export function ProjectManager({
   onChanged,
   onBusy,
 }: Props) {
+  const [kind, setKind] = useState<ProjectKind>('oml');
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const oml = kind === 'oml' || kind === 'files';
+  const filesMode = kind === 'files' || kind === 'md-files';
   const [mode, setMode] = useState<'create' | 'open' | null>(null);
   const [id, setId] = useState('');
   const [customId, setCustomId] = useState('');
@@ -161,6 +168,8 @@ export function ProjectManager({
               return;
             }
             setMode('create');
+            setKind('oml');
+            setSelectedFiles([]);
             setId(`project-${crypto.randomUUID()}`);
             setCustomId('');
             setName('');
@@ -213,12 +222,24 @@ export function ProjectManager({
             if (customIdError) return;
             const targetId = effectiveId;
             void perform(async () => {
-              await command('create', { id: targetId, name, root, output });
+              await command('create', {
+                id: targetId,
+                name,
+                root,
+                output,
+                oml,
+                ...(kind === 'files'
+                  ? { oml_files: selectedFiles }
+                  : kind === 'md-files'
+                    ? { md_files: selectedFiles }
+                    : {}),
+              });
               await onChanged(targetId);
               setMode(null);
               setCustomId('');
               setName('');
               setRoot('');
+              setSelectedFiles([]);
               setMessage(
                 '指定した出力先にWiki・検索索引・リンク関係を作成しました。',
               );
@@ -244,6 +265,30 @@ export function ProjectManager({
             />
           </label>
           <label>
+            プロジェクトの種類
+            <select
+              aria-label="プロジェクトの種類"
+              value={kind}
+              disabled={pending}
+              onChange={(e) => {
+                setKind(e.target.value as ProjectKind);
+                setRoot('');
+                setSelectedFiles([]);
+              }}
+            >
+              <option value="oml">OML仕様書からWikiを生成</option>
+              <option value="markdown">
+                Markdownフォルダー（サブフォルダーを含む）
+              </option>
+              {isTauri() && (
+                <>
+                  <option value="md-files">Markdownファイルを複数選択</option>
+                  <option value="files">OMLファイルを選んでWikiを生成</option>
+                </>
+              )}
+            </select>
+          </label>
+          <label>
             識別ID（任意・未入力なら自動採番）
             <input
               maxLength={80}
@@ -258,10 +303,57 @@ export function ProjectManager({
               {customIdError}
             </p>
           )}
-          {folder('入力フォルダー', root, setRoot, 'D:\\Specifications\\SystemA')}
-          <p className="hint">
-            お客様のMarkdownがある場所です。配下の.mdを読み取り、原本は変更しません。
-          </p>
+          {kind === 'oml' && (
+            <p className="hint">
+              OML Utilitiesで出力したMarkdownのフォルダーを選びます。生成したWikiは出力の親フォルダー内に別フォルダーとして保存します。
+            </p>
+          )}
+          {filesMode ? (
+            <>
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() =>
+                  void perform(async () => {
+                    const result = await command(
+                      kind === 'files' ? 'pick-oml-files' : 'pick-md-files',
+                    );
+                    if (Array.isArray(result.paths)) {
+                      setSelectedFiles(result.paths as string[]);
+                    }
+                    setMessage('');
+                  }, 'ファイルを選択しています…')
+                }
+              >
+                {kind === 'files' ? 'OML' : 'Markdown'}ファイルを選択（複数可）
+              </button>
+              <p>{selectedFiles.length}件選択</p>
+              <ul>
+                {selectedFiles.map((path) => (
+                  <li key={path}>{path.split(/[\\/]/).pop()}</li>
+                ))}
+              </ul>
+              <p className="hint">
+                CtrlまたはShiftを押しながら複数選べます。
+                {kind === 'files'
+                  ? 'OML Utilitiesのoml.exeをアプリと同じフォルダーに置いてください。'
+                  : '選んだファイルのコピーを索引化します。'}
+              </p>
+            </>
+          ) : (
+            <>
+              {folder(
+                oml ? 'OML仕様書フォルダー' : '入力フォルダー',
+                root,
+                setRoot,
+                'D:\\Specifications\\SystemA',
+              )}
+              <p className="hint">
+                お客様のMarkdownがある場所です。配下の.mdを読み取り、原本は変更しません。
+              </p>
+            </>
+          )}
+
           {folder(
             '出力の親フォルダー',
             output,
@@ -291,7 +383,7 @@ export function ProjectManager({
             disabled={
               pending ||
               !name.trim() ||
-              !root.trim() ||
+              (filesMode ? !selectedFiles.length : !root.trim()) ||
               !output.trim() ||
               Boolean(customIdError)
             }

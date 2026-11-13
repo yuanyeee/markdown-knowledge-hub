@@ -8,7 +8,7 @@ use tantivy::{
     Index, IndexReader, TantivyDocument, Term,
     collector::TopDocs,
     doc,
-    query::{BooleanQuery, BoostQuery, PhraseQuery, Query, QueryParser, TermQuery},
+    query::{BooleanQuery, BoostQuery, PhraseQuery, Query, QueryParser, RegexQuery, TermQuery},
     schema::*,
     tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer},
 };
@@ -26,6 +26,7 @@ pub struct Search {
 #[derive(PartialEq)]
 struct QueryKey {
     text: String,
+    source: String,
     offset: usize,
     limit: usize,
 }
@@ -168,11 +169,22 @@ impl Search {
         self.query_page(q, 0, 50)
     }
     pub fn query_page(&self, q: &str, offset: usize, limit: usize) -> Result<Vec<String>> {
+        self.query_page_scoped(q, "", offset, limit)
+    }
+
+    pub fn query_page_scoped(
+        &self,
+        q: &str,
+        source: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<String>> {
         if q.trim().is_empty() {
             return Ok(vec![]);
         }
         let key = QueryKey {
             text: q.to_string(),
+            source: source.to_owned(),
             offset,
             limit,
         };
@@ -237,6 +249,25 @@ impl Search {
                     .join(" ");
                 parser.parse_query(&literal)?
             };
+        let query = if source.is_empty() {
+            query
+        } else {
+            let folder = regex::escape(source.trim_end_matches(".md"));
+            let scope = BooleanQuery::union(vec![
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.path, source),
+                    IndexRecordOption::Basic,
+                )),
+                Box::new(RegexQuery::from_pattern(
+                    &format!("{folder}/.*"),
+                    self.path,
+                )?),
+            ]);
+            Box::new(BooleanQuery::intersection(vec![
+                query,
+                Box::new(BoostQuery::new(Box::new(scope), 0.0)),
+            ]))
+        };
         let mut paths = vec![];
         for (_, address) in searcher.search(
             &query,

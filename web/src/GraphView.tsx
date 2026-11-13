@@ -6,17 +6,21 @@ import { read } from './transport';
 
 type Data = {
   nodes: GraphNode[];
-  edges: { source: string; target: string }[];
+  edges: { source: string; target: string; call?: boolean }[];
   truncated: boolean;
 };
 
 export function GraphView({
   project,
   center,
+  expanded,
+  onToggleExpand,
   onOpen,
 }: {
   project: string;
   center?: string;
+  expanded: boolean;
+  onToggleExpand: () => void;
   onOpen: (path: string) => void;
 }) {
   const [data, setData] = useState<Data | null>(null);
@@ -47,6 +51,7 @@ export function GraphView({
   useEffect(() => {
     if (!data?.nodes.length || !container.current) return;
     let renderer: Sigma | undefined;
+    let observer: ResizeObserver | undefined;
     try {
       const graph = new Graph({ type: 'directed' });
       const activeCenter = summary ? undefined : center;
@@ -74,8 +79,13 @@ export function GraphView({
           !graph.hasDirectedEdge(e.source, e.target)
         ) {
           graph.addDirectedEdge(e.source, e.target, {
-            size: 1.5,
-            color: '#b4c7c0',
+            size: e.call ? 3 : 1.5,
+            color:
+              e.source === activeCenter
+                ? '#246bb0'
+                : e.target === activeCenter
+                  ? '#b35d21'
+                  : '#b4c7c0',
           });
         }
       }
@@ -85,6 +95,14 @@ export function GraphView({
         labelFont: 'Meiryo, sans-serif',
         stagePadding: 100,
       });
+      const host = container.current;
+      observer = new ResizeObserver(() => {
+        if (host.clientWidth && host.clientHeight) {
+          renderer?.resize();
+          renderer?.scheduleRender();
+        }
+      });
+      observer.observe(host);
       if (!summary) {
         renderer.on('clickNode', ({ node }) => open.current(node));
       }
@@ -92,15 +110,25 @@ export function GraphView({
       setError(`図を描画できませんでした。下の文書一覧から参照できます。${String(e)}`);
     }
     return () => {
+      observer?.disconnect();
       renderer?.kill();
     };
   }, [data, center, summary]);
 
   return (
-    <section aria-label="リンク図">
-      <button onClick={() => setSummary((v) => !v)}>
-        {summary ? '文書単位の図' : 'フォルダー集約図'}
-      </button>
+    <section className="link-graph" aria-label="リンク図">
+      <div className="link-graph-controls">
+        <button onClick={() => setSummary((v) => !v)}>
+          {summary ? '文書単位の図' : 'フォルダー集約図'}
+        </button>
+        <button
+          type="button"
+          aria-pressed={expanded}
+          onClick={onToggleExpand}
+        >
+          {expanded ? 'リンク図を元に戻す（Esc）' : 'リンク図を拡大'}
+        </button>
+      </div>
       <h2>
         {summary
           ? 'フォルダー集約図'
@@ -110,8 +138,8 @@ export function GraphView({
       </h2>
       <p className="hint">
         {summary
-          ? '全体の文書をフォルダー階層別に集約しています。'
-          : 'ノードをクリックするとWikiを開きます。'}
+          ? '全体の文書をフォルダー階層別に集約しています。OMLの生成フォルダーは元仕様書名で表示します。'
+          : '橙色は選択文書への参照、青色は選択文書からの参照です。太線は処理フローで確認した呼び出しです。矢印は参照先を指します。ノードからWikiを開けます。'}
         ドラッグ・ホイールで移動／拡大できます。
       </p>
       {error && <p role="alert">{error}</p>}
@@ -127,7 +155,9 @@ export function GraphView({
           </p>
           {!data.nodes.length && <p>Markdown文書がありません。</p>}
           <details>
-            <summary>図に含まれる文書</summary>
+            <summary>
+              {summary ? '図に含まれるグループ' : '図に含まれる文書'}
+            </summary>
             {data.nodes.map((n) => (
               <button
                 className="hit"
@@ -135,7 +165,7 @@ export function GraphView({
                 disabled={summary}
                 onClick={() => onOpen(n.path)}
               >
-                {n.title} <small>{n.path}</small>
+                {n.title} {!summary && <small>{n.path}</small>}
               </button>
             ))}
           </details>
