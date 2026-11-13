@@ -14,6 +14,7 @@ use std::{
 struct AdminState {
     data: PathBuf,
     serial: Arc<Mutex<()>>,
+    port: u16,
 }
 fn denied() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -21,7 +22,7 @@ fn denied() -> (StatusCode, Json<serde_json::Value>) {
         Json(serde_json::json!({"error":"ローカル管理画面から操作してください"})),
     )
 }
-fn authorize(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn authorize(headers: &HeaderMap, port: u16) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     if headers.get("x-hub-admin").and_then(|v| v.to_str().ok()) != Some("1") {
         return Err(denied());
     }
@@ -29,30 +30,36 @@ fn authorize(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Va
         .get("origin")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(denied)?;
-    if ![
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        "http://127.0.0.1:3847",
-        "http://localhost:3847",
-    ]
-    .contains(&origin)
-    {
+    let allowed = [
+        "http://127.0.0.1:5173".to_string(),
+        "http://localhost:5173".to_string(),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+    ];
+    if !allowed.iter().any(|candidate| candidate == origin) {
         return Err(denied());
     }
     Ok(())
 }
 // These read-only endpoints use a custom header to prevent cross-origin simple
 // requests. Same-origin browser GET requests need not include an Origin header.
-fn authorize_read(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn authorize_read(
+    headers: &HeaderMap,
+    port: u16,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     if headers.get("x-hub-admin").and_then(|v| v.to_str().ok()) != Some("1") {
         return Err(denied());
     }
     if headers.contains_key("origin") {
-        authorize(headers)?;
+        authorize(headers, port)?;
     }
     Ok(())
 }
+#[cfg(test)]
 pub fn router(data: PathBuf) -> Router {
+    router_with_port(data, 3847)
+}
+pub fn router_with_port(data: PathBuf, port: u16) -> Router {
     Router::new()
         .route("/api/admin/{operation}", post(manage))
         .route("/api/output-settings", get(output_settings))
@@ -61,6 +68,7 @@ pub fn router(data: PathBuf) -> Router {
         .with_state(AdminState {
             data,
             serial: Arc::new(Mutex::new(())),
+            port,
         })
 }
 async fn service(state: AdminState, operation: String, args: serde_json::Value) -> ApiResult {
@@ -77,9 +85,13 @@ async fn service(state: AdminState, operation: String, args: serde_json::Value) 
         Ok(Ok(value)) => Ok(Json(value)),
         Ok(Err(error)) => {
             eprintln!("management API: {error:#}");
+            let message = crate::client_error_message(
+                &error,
+                "フォルダーとプロジェクト設定を確認してください",
+            );
             Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error":"フォルダーとプロジェクト設定を確認してください"})),
+                Json(serde_json::json!({"error": message})),
             ))
         }
         Err(error) => {
@@ -97,7 +109,7 @@ async fn manage(
     headers: HeaderMap,
     Json(args): Json<serde_json::Value>,
 ) -> ApiResult {
-    authorize(&headers)?;
+    authorize(&headers, state.port)?;
     if ![
         "create",
         "remove",
@@ -117,15 +129,15 @@ async fn manage(
     service(state, format!("admin/{operation}"), args).await
 }
 async fn output_settings(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult {
-    authorize_read(&headers)?;
+    authorize_read(&headers, state.port)?;
     service(state, "output-settings".into(), serde_json::json!({})).await
 }
 async fn retired_outputs(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult {
-    authorize_read(&headers)?;
+    authorize_read(&headers, state.port)?;
     service(state, "retired-outputs".into(), serde_json::json!({})).await
 }
-async fn pick_folder(headers: HeaderMap) -> ApiResult {
-    authorize(&headers)?;
+async fn pick_folder(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult {
+    authorize(&headers, state.port)?;
     let result = tokio::task::spawn_blocking(choose_folder).await;
     match result {
         Ok(Ok(path)) => Ok(Json(serde_json::json!({"path":path}))),
@@ -328,5 +340,65 @@ mod tests {
             std::fs::read_to_string(source.path().join("a.md")).unwrap(),
             "# 原本"
         );
+    }
+
+    #[tokio::test]
+    async fn custom_serve_port_authorizes_matching_origin_and_surfaces_validation_errors() {
+        let source = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("a.md"), "# 原本").unwrap();
+        let app = crate::app_router_with_port(data.path().to_path_buf(), true, 4915);
+        let payload =
+            serde_json::json!({"id":"demo","name":"Demo","root":source.path()}).to_string();
+
+        let wrong_port = app
+            .clone()
+            .oneshot(
+                Request::post("/api/admin/create")
+                    .header("content-type", "application/json")
+                    .header("origin", "http://127.0.0.1:3847")
+                    .header("x-hub-admin", "1")
+                    .body(Body::from(payload.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_port.status(), StatusCode::FORBIDDEN);
+
+        let custom_port_ok = app
+            .clone()
+            .oneshot(
+                Request::post("/api/admin/create")
+                    .header("content-type", "application/json")
+                    .header("origin", "http://127.0.0.1:4915")
+                    .header("x-hub-admin", "1")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(custom_port_ok.status(), StatusCode::OK);
+
+        let invalid_id_payload =
+            serde_json::json!({"id":"BAD_ID","name":"Demo","root":source.path()}).to_string();
+        let validation_err = app
+            .oneshot(
+                Request::post("/api/admin/create")
+                    .header("content-type", "application/json")
+                    .header("origin", "http://localhost:4915")
+                    .header("x-hub-admin", "1")
+                    .body(Body::from(invalid_id_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(validation_err.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(validation_err.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(body["error"].as_str().unwrap().contains("プロジェクトID"));
     }
 }

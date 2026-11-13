@@ -3,17 +3,24 @@ use crate::{Hub, ScanReport};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) struct WorkingGeneration {
+    pub project: String,
+    pub dir: PathBuf,
+    pub reused_files: HashSet<PathBuf>,
+}
+
 impl Hub {
     pub(crate) fn active_dir(&self, id: &str) -> Result<PathBuf> {
-        if let Some((project, dir)) = &self.working
-            && project == id
+        if let Some(working) = &self.working
+            && working.project == id
         {
-            return Ok(dir.clone());
+            return Ok(working.dir.clone());
         }
         self.index_dir_in_snapshot(id, &self.db(id)?)
     }
@@ -50,13 +57,14 @@ impl Hub {
         before_publish: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
         db.execute("INSERT INTO state_text(key,value) VALUES('source_root',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[self.root(id)?.to_str().ok_or_else(||anyhow::anyhow!("入力パスが不正です"))?])?;
-        let (_, stage) = self
+        let working = self
             .working
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("更新世代がありません"))?;
+        let stage = &working.dir;
         for entry in walkdir::WalkDir::new(stage) {
             let entry = entry?;
-            if entry.file_type().is_file() {
+            if entry.file_type().is_file() && !working.reused_files.contains(entry.path()) {
                 fs::File::options()
                     .read(true)
                     .write(true)
@@ -169,10 +177,16 @@ impl Hub {
         if stage.canonicalize()? != stage {
             bail!("世代保存先が不正です");
         }
-        if !rebuild && crate::search::Search::current(&source.join("search"))? {
-            copy_search(&source.join("search"), &stage.join("search"))?;
-        }
-        self.working = Some((id.to_string(), stage.clone()));
+        let reused_files = if !rebuild && crate::search::Search::current(&source.join("search"))? {
+            copy_search(&source.join("search"), &stage.join("search"))?
+        } else {
+            HashSet::new()
+        };
+        self.working = Some(WorkingGeneration {
+            project: id.to_string(),
+            dir: stage.clone(),
+            reused_files,
+        });
         let result = self.scan_staged(id, verify, paths, rebuild, before_publish);
         self.working = None;
         if result.is_err() {
@@ -240,10 +254,11 @@ impl Hub {
     }
 }
 
-fn copy_search(source: &Path, target: &Path) -> Result<()> {
+fn copy_search(source: &Path, target: &Path) -> Result<HashSet<PathBuf>> {
     fs::create_dir_all(target)?;
+    let mut reused = HashSet::new();
     if !source.exists() {
-        return Ok(());
+        return Ok(reused);
     }
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -263,10 +278,13 @@ fn copy_search(source: &Path, target: &Path) -> Result<()> {
                         "idx" | "pos" | "term" | "fast" | "fieldnorm" | "store" | "del"
                     )
                 });
-            if !immutable || fs::hard_link(entry.path(), target.join(&name)).is_err() {
-                fs::copy(entry.path(), target.join(name))?;
+            let dest = target.join(&name);
+            if immutable && fs::hard_link(entry.path(), &dest).is_ok() {
+                reused.insert(dest);
+            } else {
+                fs::copy(entry.path(), dest)?;
             }
         }
     }
-    Ok(())
+    Ok(reused)
 }

@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
             port,
         } => {
             drop(hub);
-            let mut app = app_router(args.data.clone(), admin);
+            let mut app = app_router_with_port(args.data.clone(), admin, port);
             if let Some(path) = web_dir {
                 anyhow::ensure!(
                     path.join("index.html").is_file(),
@@ -179,12 +179,17 @@ fn router(data: PathBuf) -> Router {
         .route("/api/links", get(links))
         .route("/api/link-target", get(link_target))
         .route("/api/document-links", get(document_links))
+        .route("/api/diagnostics-page", get(diagnostics_page))
         .route("/api/stats", get(stats))
         .route("/api/graph", get(graph))
         .route("/api/graph-summary", get(graph_summary))
         .with_state(data)
 }
+#[cfg(test)]
 fn app_router(data: PathBuf, admin_enabled: bool) -> Router {
+    app_router_with_port(data, admin_enabled, 3847)
+}
+fn app_router_with_port(data: PathBuf, admin_enabled: bool, port: u16) -> Router {
     let app = router(data.clone()).route(
         "/api/capabilities",
         get(move || async move {
@@ -192,7 +197,7 @@ fn app_router(data: PathBuf, admin_enabled: bool) -> Router {
         }),
     );
     if admin_enabled {
-        app.merge(admin::router(data))
+        app.merge(admin::router_with_port(data, port))
     } else {
         app
     }
@@ -241,6 +246,8 @@ struct LinkParameters {
     #[serde(default)]
     q: String,
     #[serde(default)]
+    kind: String,
+    #[serde(default)]
     offset: usize,
     #[serde(default = "default_link_limit")]
     limit: usize,
@@ -249,6 +256,15 @@ fn default_link_limit() -> usize {
     100
 }
 type ApiResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
+pub(crate) fn client_error_message(error: &anyhow::Error, fallback: &str) -> String {
+    let message = error.to_string();
+    if !message.is_ascii() && message.len() <= 300 && !message.contains('\n') {
+        message
+    } else {
+        fallback.to_string()
+    }
+}
+
 async fn run(
     data: PathBuf,
     operation: impl FnOnce(Hub) -> Result<serde_json::Value> + Send + 'static,
@@ -257,11 +273,13 @@ async fn run(
         Ok(Ok(value)) => Ok(Json(value)),
         Ok(Err(error)) => {
             eprintln!("API: {error:#}");
+            let message = client_error_message(
+                &error,
+                "指定されたプロジェクト・文書・検索条件を確認してください",
+            );
             Err((
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error":"指定されたプロジェクト・文書・検索条件を確認してください"}),
-                ),
+                Json(serde_json::json!({"error": message})),
             ))
         }
         Err(error) => {
@@ -333,6 +351,17 @@ async fn backlinks_page(State(data): State<PathBuf>, Query(p): Query<LinkParamet
     })
     .await
 }
+async fn diagnostics_page(
+    State(data): State<PathBuf>,
+    Query(p): Query<LinkParameters>,
+) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.diagnostics_page(
+            &p.project, &p.kind, p.offset, p.limit,
+        )?)?)
+    })
+    .await
+}
 
 #[cfg(test)]
 mod tests {
@@ -378,6 +407,7 @@ mod tests {
             "/api/search-page?project=demo&q=API&limit=1",
             "/api/backlinks-page?project=demo&path=b.md&limit=1",
             "/api/link-target?project=demo&path=a.md&target=b",
+            "/api/diagnostics-page?project=demo&kind=missing&limit=10",
             "/api/graph-summary?project=demo",
             "/api/stats?project=demo",
         ] {
