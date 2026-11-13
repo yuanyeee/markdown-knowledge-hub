@@ -179,6 +179,7 @@ fn router(data: PathBuf) -> Router {
         .route("/api/links", get(links))
         .route("/api/link-target", get(link_target))
         .route("/api/document-links", get(document_links))
+        .route("/api/diagnostics-page", get(diagnostics_page))
         .route("/api/stats", get(stats))
         .route("/api/graph", get(graph))
         .route("/api/graph-summary", get(graph_summary))
@@ -244,6 +245,8 @@ struct LinkParameters {
     path: String,
     #[serde(default)]
     q: String,
+    #[serde(default)]
+    kind: String,
     #[serde(default)]
     offset: usize,
     #[serde(default = "default_link_limit")]
@@ -348,6 +351,17 @@ async fn backlinks_page(State(data): State<PathBuf>, Query(p): Query<LinkParamet
     })
     .await
 }
+async fn diagnostics_page(
+    State(data): State<PathBuf>,
+    Query(p): Query<LinkParameters>,
+) -> ApiResult {
+    run(data, move |h| {
+        Ok(serde_json::to_value(h.diagnostics_page(
+            &p.project, &p.kind, p.offset, p.limit,
+        )?)?)
+    })
+    .await
+}
 
 #[cfg(test)]
 mod tests {
@@ -393,6 +407,7 @@ mod tests {
             "/api/search-page?project=demo&q=API&limit=1",
             "/api/backlinks-page?project=demo&path=b.md&limit=1",
             "/api/link-target?project=demo&path=a.md&target=b",
+            "/api/diagnostics-page?project=demo&kind=missing&limit=10",
             "/api/graph-summary?project=demo",
             "/api/stats?project=demo",
         ] {

@@ -55,6 +55,12 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             number(args, "limit", 100)?,
         )?)?,
         "stats" => serde_json::to_value(hub.stats(text(args, "project")?)?)?,
+        "diagnostics-page" => serde_json::to_value(hub.diagnostics_page(
+            text(args, "project")?,
+            text(args, "kind")?,
+            number(args, "offset", 0)?,
+            number(args, "limit", 100)?,
+        )?)?,
         "graph-summary" => serde_json::to_value(hub.graph_summary(text(args, "project")?)?)?,
         "graph" => serde_json::to_value(
             hub.graph(

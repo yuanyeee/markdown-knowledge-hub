@@ -101,6 +101,53 @@ mod tests {
         assert_eq!(summary.edges.len(), 1);
     }
     #[test]
+    fn diagnostics_page_lists_all_issue_categories() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        for dir in ["x", "y"] {
+            std::fs::create_dir(source.path().join(dir)).unwrap();
+        }
+        std::fs::write(source.path().join("x/dup.md"), "# Dup X\n## Section\n").unwrap();
+        std::fs::write(source.path().join("y/dup.md"), "# Dup Y\n").unwrap();
+        std::fs::write(
+            source.path().join("main.md"),
+            "# Main\n[[dup]] [[ghost]] [[x/dup#unknown]]",
+        )
+        .unwrap();
+        std::fs::write(source.path().join("lonely.md"), "# Lonely").unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+
+        let missing = hub.diagnostics_page("demo", "missing", 0, 50).unwrap();
+        assert_eq!(missing.items.len(), 1);
+        assert_eq!(missing.items[0].path, "main.md");
+        assert_eq!(missing.items[0].detail.as_deref(), Some("ghost"));
+
+        let ambiguous = hub.diagnostics_page("demo", "ambiguous", 0, 50).unwrap();
+        assert_eq!(ambiguous.items.len(), 1);
+        assert_eq!(ambiguous.items[0].detail.as_deref(), Some("dup"));
+
+        let bad_heading = hub
+            .diagnostics_page("demo", "missing-heading", 0, 50)
+            .unwrap();
+        assert_eq!(bad_heading.items.len(), 1);
+        assert_eq!(
+            bad_heading.items[0].detail.as_deref(),
+            Some("x/dup#unknown")
+        );
+
+        let dupes = hub
+            .diagnostics_page("demo", "duplicate-names", 0, 50)
+            .unwrap();
+        assert_eq!(dupes.items.len(), 2);
+
+        let isolated = hub.diagnostics_page("demo", "isolated", 0, 50).unwrap();
+        assert!(isolated.items.iter().any(|i| i.path == "lonely.md"));
+
+        assert!(hub.diagnostics_page("demo", "invalid-kind", 0, 50).is_err());
+    }
+    #[test]
     fn backlink_pages_and_folder_summary_cover_all_documents() {
         let source = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
