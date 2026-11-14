@@ -41,6 +41,7 @@ type Doc = Hit & {
   markdown: string;
   chapters?: Chapter[] | null;
   chapter?: number | null;
+  okf?: OkfInfo | null;
 };
 
 type Link = {
@@ -66,7 +67,10 @@ type DiagnosticKind =
   | 'ambiguous'
   | 'missing-heading'
   | 'isolated'
-  | 'duplicate-names';
+  | 'duplicate-names'
+  | 'stale'
+  | 'frontmatter-invalid'
+  | 'missing-type';
 
 type DiagnosticItem = {
   path: string;
@@ -82,6 +86,26 @@ type ProjectStats = {
   ambiguous: number;
   isolated: number;
   duplicate_names: number;
+  stale: number;
+  missing_type: number;
+  frontmatter_invalid: number;
+  okf: boolean;
+  types: { kind: string; count: number }[];
+};
+
+type OkfInfo = {
+  kind?: string;
+  description?: string;
+  resource?: string;
+  tags?: string[];
+  trust?: string;
+  stale?: boolean;
+  stale_after?: string;
+  status?: string;
+  generated_by?: string;
+  sources?: string[];
+  error?: string;
+  bundle?: string;
 };
 
 type HistoryEntry = {
@@ -106,7 +130,60 @@ const DIAGNOSTIC_LABELS: Record<DiagnosticKind, string> = {
   'missing-heading': '見出しなし',
   isolated: '孤立文書',
   'duplicate-names': '同名文書群',
+  stale: '期限切れ',
+  'frontmatter-invalid': 'frontmatter不正',
+  'missing-type': 'typeなし',
 };
+
+const TRUST_LABELS: Record<string, string> = {
+  unverified: '未確認',
+  'machine-confirmed': '機械確認',
+  'human-reviewed': '人の確認',
+};
+
+function formatJst(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(date)} JST`;
+}
+
+function OkfSummary({ info }: { info: OkfInfo }) {
+  const trust = info.trust ? TRUST_LABELS[info.trust] || info.trust : '';
+  return (
+    <section className="okf-summary" aria-label="知識の属性">
+      <div className="okf-badges">
+        {info.bundle && <span>OKF {info.bundle}</span>}
+        {info.kind && <span>{info.kind}</span>}
+        {trust && (info.kind || info.trust !== 'unverified') && (
+          <span className={info.trust}>{trust}</span>
+        )}
+        {info.status && <span>{info.status}</span>}
+        {info.stale_after && (
+          <span className={info.stale ? 'stale' : undefined}>
+            {info.stale ? '期限切れ ' : '期限 '}
+            {formatJst(info.stale_after)}
+          </span>
+        )}
+        {info.generated_by && <span>生成 {info.generated_by}</span>}
+        {info.tags?.map((tag) => (
+          <span key={tag}>{tag}</span>
+        ))}
+      </div>
+      {info.description && <p>{info.description}</p>}
+      {info.resource && <p>参照 {info.resource}</p>}
+      {!!info.sources?.length && <p>出典 {info.sources.join('、')}</p>}
+      {info.error && <p className="okf-error">{info.error}</p>}
+    </section>
+  );
+}
 
 const WikiPre: NonNullable<Components['pre']> = ({
   children,
@@ -196,6 +273,7 @@ function App() {
   const [diagKind, setDiagKind] = useState<DiagnosticKind | null>(null);
   const [diagItems, setDiagItems] = useState<DiagnosticItem[]>([]);
   const [diagNextOffset, setDiagNextOffset] = useState<number | null>(null);
+  const [typeFilter, setTypeFilter] = useState('');
 
   useEffect(() => {
     if (anchor && anchor !== 'wiki:original' && doc && !doc.chapters) {
@@ -282,6 +360,7 @@ function App() {
     setDiagKind(null);
     setDiagItems([]);
     setDiagNextOffset(null);
+    setTypeFilter('');
 
     if (project) {
       setBusy(true);
@@ -418,9 +497,12 @@ function App() {
     setError('');
     setBusy(true);
     try {
+      const kind = query ? '' : typeFilter;
+      if (query) setTypeFilter('');
       const found = await api<Page<Hit>>('search-page', project, {
         q: query,
         source: searchSource,
+        kind,
         limit: '50',
       });
       if (current !== generation.current) return;
@@ -498,6 +580,7 @@ function App() {
           : api<Page<Hit>>('search-page', project, {
               q: entry.query,
               source: entry.searchSource,
+              kind: entry.query ? '' : typeFilter,
               limit: '50',
             }),
         entry.path
@@ -618,6 +701,7 @@ function App() {
         const page = await api<Page<Hit>>('search-page', project, {
           q: searched,
           source: searchedSource,
+          kind: searched ? '' : typeFilter,
           offset: String(offset),
           limit: '50',
         });
@@ -684,7 +768,11 @@ function App() {
 
   const listed = searched ? hits : source ? sourcePages : hits;
   const visibleHits =
-    doc && !searched && !source && !listed.some((hit) => hit.path === doc.path)
+    doc &&
+    !searched &&
+    !source &&
+    !typeFilter &&
+    !listed.some((hit) => hit.path === doc.path)
       ? [doc, ...listed]
       : listed;
 
@@ -696,7 +784,7 @@ function App() {
         ? hit.path === source
           ? '元仕様書'
           : hit.title.split(' · ')[0]
-        : '文書';
+        : typeFilter || '文書';
     const items = groups.get(kind) ?? [];
     items.push(hit);
     groups.set(kind, items);
@@ -891,6 +979,22 @@ function App() {
             '他の文書との解決済みリンクがない文書の一覧を表示',
           )}
           {renderDiagnosticStat('duplicate-names', stats.duplicate_names)}
+          {renderDiagnosticStat(
+            'stale',
+            stats.stale,
+            'stale_after を過ぎた文書の一覧を表示',
+          )}
+          {renderDiagnosticStat(
+            'frontmatter-invalid',
+            stats.frontmatter_invalid,
+            'frontmatterを読み取れない文書の一覧を表示',
+          )}
+          {stats.okf &&
+            renderDiagnosticStat(
+              'missing-type',
+              stats.missing_type,
+              'OKFバンドルで type がない概念文書の一覧を表示',
+            )}
         </div>
       )}
 
@@ -1055,6 +1159,49 @@ function App() {
               </select>
             </label>
           )}
+          {!!stats?.types.length && (
+            <label className="source-filter">
+              種別
+              <select
+                aria-label="種別で絞り込み"
+                value={typeFilter}
+                disabled={busy}
+                onChange={(event) => {
+                  const kind = event.target.value;
+                  setTypeFilter(kind);
+                  setQ('');
+                  setSearched('');
+                  setSearchedSource('');
+                  const current = ++generation.current;
+                  setBusy(true);
+                  setError('');
+                  void api<Page<Hit>>('search-page', project, {
+                    kind,
+                    limit: '50',
+                  })
+                    .then((found) => {
+                      if (current !== generation.current) return;
+                      setHits(found.items);
+                      setNextHit(found.next_offset);
+                      leftPane.current?.scrollTo(0, 0);
+                    })
+                    .catch((reason: unknown) => {
+                      if (current === generation.current) setError(String(reason));
+                    })
+                    .finally(() => {
+                      if (current === generation.current) setBusy(false);
+                    });
+                }}
+              >
+                <option value="">すべての種別</option>
+                {stats.types.map((item) => (
+                  <option key={item.kind} value={item.kind}>
+                    {item.kind}（{item.count.toLocaleString()}）
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {searched && (
             <div className="search-summary">
               <span>
@@ -1093,12 +1240,15 @@ function App() {
                         : hit.title}
                     </strong>
                     {(!source || searched) && <span>{hit.path}</span>}
-                    {searched && hit.snippet && (
-                      <HighlightedSnippet
-                        text={hit.snippet}
-                        query={searched}
-                      />
-                    )}
+                    {hit.snippet &&
+                      (searched ? (
+                        <HighlightedSnippet
+                          text={hit.snippet}
+                          query={searched}
+                        />
+                      ) : (
+                        <span className="snippet">{hit.snippet}</span>
+                      ))}
                   </button>
                 ))}
               </section>
@@ -1131,6 +1281,7 @@ function App() {
           ) : doc ? (
             <>
               <div className="docpath">{doc.path}</div>
+              {doc.okf && <OkfSummary info={doc.okf} />}
               {showElementContents ? (
                 <section aria-label="要素別Wikiの目次">
                   <h1>{doc.title}</h1>

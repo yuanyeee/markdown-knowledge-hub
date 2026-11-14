@@ -332,6 +332,50 @@ main code {
   margin-bottom: 8px;
 }
 
+.okf-summary {
+  margin: 0 0 16px;
+}
+
+.okf-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.okf-badges span {
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef3f8;
+  color: #31465c;
+}
+
+.okf-badges .human-reviewed {
+  background: #e5f4ea;
+  color: #1d5b38;
+}
+
+.okf-badges .machine-confirmed {
+  background: #e7f0fb;
+  color: #1d4570;
+}
+
+.okf-badges .stale {
+  background: #fde8e4;
+  color: #8a2b1d;
+}
+
+.okf-summary p {
+  margin: 8px 0 0;
+  color: #3d5166;
+  font-size: 14px;
+}
+
+.okf-error {
+  color: #8a2b1d;
+}
+
 .chapter-reader {
   margin: 8px 0 16px;
   padding: 12px;

@@ -24,6 +24,8 @@ pub struct ReadingDocument {
     markdown: String,
     chapters: Option<Vec<Chapter>>,
     chapter: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    okf: Option<crate::okf::OkfInfo>,
 }
 
 type CachedChapters = Option<(String, Arc<Vec<Chapter>>)>;
@@ -117,6 +119,7 @@ impl Hub {
                 row.get::<_, String>(0)
             })
         };
+        let okf = crate::okf::info(&db, path)?;
         if size <= LARGE_DOCUMENT as i64 {
             return Ok(ReadingDocument {
                 path: path.to_owned(),
@@ -124,6 +127,7 @@ impl Hub {
                 markdown: load_raw()?,
                 chapters: None,
                 chapter: None,
+                okf,
             });
         }
         let cached = CHAPTERS
@@ -180,6 +184,7 @@ impl Hub {
             markdown,
             chapters: Some(chapters.as_ref().clone()),
             chapter: selected,
+            okf,
         })
     }
 }

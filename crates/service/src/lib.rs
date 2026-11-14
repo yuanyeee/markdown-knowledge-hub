@@ -32,6 +32,7 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             args.get("source").and_then(Value::as_str).unwrap_or(""),
             number(args, "offset", 0)?,
             number(args, "limit", 50)?,
+            args.get("kind").and_then(Value::as_str).unwrap_or(""),
         )?)?,
         "oml-catalog" => serde_json::to_value(hub.oml_catalog(
             text(args, "project")?,
