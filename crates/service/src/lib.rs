@@ -1,7 +1,11 @@
+mod mcp;
+
 use anyhow::{Context, Result, bail};
 use hub_core::Hub;
 use serde_json::{Value, json};
 use std::path::Path;
+
+pub use mcp::{desktop_data_dir, mcp_config_text, print_mcp_config, serve_mcp};
 
 fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)

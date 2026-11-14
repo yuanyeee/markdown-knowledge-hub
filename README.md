@@ -65,11 +65,49 @@ cargo run -p hub-app -- --data D:\HubState serve --web-dir web/dist --admin
 
 `update PROJECT docs/a.md`は対象ファイルをハッシュ検証して更新します。`rebuild PROJECT`は完全再作成です。通常のscanはサイズとmtimeを使用し、両方不変の変更を確認する場合は`scan PROJECT --verify`を使います。
 
+## Claude / Gemini CLI / Antigravity から使う
+
+ローカルのstdio MCPを同梱しています。公開するのは `search`（path・title・短い抜粋、最大5件）と `read`（1文書、約8KB）だけです。リンク図・管理操作・索引の全件出力はありません。通信は親プロセスとの標準入出力だけで、待受ポートは開きません。検索そのものはこのPCの索引で完結します。
+
+モデルへ渡る使い方は、接続時の `instructions` と各ツールの説明に入れています。抜粋で判断し、足りない1件だけ読み、長い文書は見出しか `next_offset` で続ける、という手順です。
+
+デスクトップ版は、起動中のアプリと同じ登録を見ます。保存先は `%LOCALAPPDATA%\com.yuanyeee.markdownknowledgehub` です。別の索引を使うときだけ `--data-dir` に絶対パスを足します。開発用 `hub-app mcp` は、`--data` を省略すると同じデスクトップの保存先を使います。他の `hub-app` コマンドは従来どおり `.hub` です。
+
+インストールしたexeの設定例は、次でこのPCのパスが入ったJSONが出ます。
+
+```powershell
+& "$env:LOCALAPPDATA\Markdown Knowledge Hub\markdown-knowledge-hub.exe" mcp --print-config
+```
+
+開発中は `cargo run -p hub-app -- mcp --print-config` です。出力の `mcpServers` を、使うクライアントの設定へ足します。
+
+| クライアント | 設定ファイル |
+| --- | --- |
+| Claude Code | 作業フォルダーの `.mcp.json`、または `claude mcp add` |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Gemini CLI | `~/.gemini/settings.json` または作業フォルダーの `.gemini/settings.json` |
+| Antigravity | `~/.gemini/config/mcp_config.json`（全体）、`.agents/mcp_config.json`（作業フォルダー） |
+
+形は共通です。`serverUrl` はリモート用なので使いません。
+
+```json
+{
+  "mcpServers": {
+    "markdown-knowledge-hub": {
+      "command": "C:\\Users\\<ユーザー>\\AppData\\Local\\Markdown Knowledge Hub\\markdown-knowledge-hub.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+`mcp` を付けて起動すると画面は開かず、親プロセスの入出力だけで応答します。設定を保存したあとは、各クライアントを起動し直してください。アプリを開いたままでも検索できます。索引を更新したいときは、アプリの「監視を開始」か「再作成」を使います。MCPは原本も索引も書き換えません。
+
 ## 構成
 
 ```text
 crates/core/       解析・リンク解決・検索・原子的更新・監視・バックアップ
-crates/service/    Web/Desktop共用の明示的操作
+crates/service/    Web/Desktop共用の明示的操作と、stdio MCP
 crates/app/        CLIとloopback HTTP API、本番静的ファイル配信
 web/src/          共通React UI
 web/src-tauri/    Tauri Windowsホスト・監視管理・NSIS
