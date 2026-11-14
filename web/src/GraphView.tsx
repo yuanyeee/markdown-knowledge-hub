@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
-import Graph from 'graphology';
-import Sigma from 'sigma';
-import { layoutNodes, type GraphNode } from './graph';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  GRAPH_LABEL,
+  buildGraphLayout,
+  type GraphNode,
+  type NodeRole,
+} from './graph';
 import { read } from './transport';
 
 type Data = {
@@ -9,6 +12,53 @@ type Data = {
   edges: { source: string; target: string; call?: boolean }[];
   truncated: boolean;
 };
+
+type Transform = {
+  x: number;
+  y: number;
+  scale: number;
+};
+
+function cardPalette(role: NodeRole, active: boolean) {
+  if (role === 'center') {
+    return {
+      fill: '#fff9ec',
+      stroke: active ? '#b87d14' : '#d59b34',
+      strokeWidth: 2,
+      accent: '#c18b2e',
+      prefix: '#8c5d10',
+      text: '#261a05',
+    };
+  }
+  if (role === 'incoming') {
+    return {
+      fill: '#fffdfb',
+      stroke: active ? '#b35d21' : '#e0bfaa',
+      strokeWidth: active ? 1.8 : 1.2,
+      accent: '#b35d21',
+      prefix: '#8f4c20',
+      text: '#1f2f43',
+    };
+  }
+  if (role === 'outgoing') {
+    return {
+      fill: '#fbfdff',
+      stroke: active ? '#246bb0' : '#b7cde3',
+      strokeWidth: active ? 1.8 : 1.2,
+      accent: '#246bb0',
+      prefix: '#225891',
+      text: '#1f2f43',
+    };
+  }
+  return {
+    fill: '#ffffff',
+    stroke: active ? '#276453' : '#c6d6d0',
+    strokeWidth: active ? 1.8 : 1.2,
+    accent: '#327d68',
+    prefix: '#566b7d',
+    text: '#1f2f43',
+  };
+}
 
 export function GraphView({
   project,
@@ -26,14 +76,29 @@ export function GraphView({
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState('');
   const [summary, setSummary] = useState(false);
-  const container = useRef<HTMLDivElement>(null);
-  const open = useRef(onOpen);
-  open.current = onOpen;
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [viewportSize, setViewportSize] = useState({ width: 900, height: 480 });
+  const [transform, setTransform] = useState<Transform>({
+    x: 0,
+    y: 0,
+    scale: 1,
+  });
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    moved: boolean;
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
     setData(null);
     setError('');
+    setHovered(null);
     read<Data>(summary ? 'graph-summary' : 'graph', project, {
       path: center || '',
     })
@@ -48,78 +113,130 @@ export function GraphView({
     };
   }, [project, center, summary]);
 
-  useEffect(() => {
-    if (!data?.nodes.length || !container.current) return;
-    let renderer: Sigma | undefined;
-    let observer: ResizeObserver | undefined;
-    try {
-      const graph = new Graph({ type: 'directed' });
-      const activeCenter = summary ? undefined : center;
-      const degree = new Map<string, number>();
-      for (const e of data.edges) {
-        degree.set(e.source, (degree.get(e.source) || 0) + 1);
-        degree.set(e.target, (degree.get(e.target) || 0) + 1);
-      }
-      for (const n of layoutNodes(data.nodes, activeCenter)) {
-        const deg = degree.get(n.path) || 0;
-        const isCenter = n.path === activeCenter;
-        graph.addNode(n.path, {
-          x: n.x,
-          y: n.y,
-          label: n.title,
-          size: isCenter ? 14 : Math.min(12, 6.5 + Math.log2(deg + 1) * 1.4),
-          forceLabel: (summary && data.nodes.length < 30) || isCenter,
-          color: isCenter ? '#c18b2e' : '#327d68',
-        });
-      }
-      for (const e of data.edges) {
-        if (
-          graph.hasNode(e.source) &&
-          graph.hasNode(e.target) &&
-          !graph.hasDirectedEdge(e.source, e.target)
-        ) {
-          graph.addDirectedEdge(e.source, e.target, {
-            size: e.call ? 3 : 1.5,
-            color:
-              e.source === activeCenter
-                ? '#246bb0'
-                : e.target === activeCenter
-                  ? '#b35d21'
-                  : '#b4c7c0',
-          });
-        }
-      }
-      renderer = new Sigma(graph, container.current, {
-        renderEdgeLabels: false,
-        defaultEdgeType: 'arrow',
-        labelFont: 'Meiryo, sans-serif',
-        stagePadding: 100,
-      });
-      const host = container.current;
-      observer = new ResizeObserver(() => {
-        if (host.clientWidth && host.clientHeight) {
-          renderer?.resize();
-          renderer?.scheduleRender();
-        }
-      });
-      observer.observe(host);
-      if (!summary) {
-        renderer.on('clickNode', ({ node }) => open.current(node));
-      }
-    } catch (e) {
-      setError(`図を描画できませんでした。下の文書一覧から参照できます。${String(e)}`);
+  const activeCenter = summary ? undefined : center;
+
+  const layout = useMemo(
+    () =>
+      data
+        ? buildGraphLayout(data.nodes, activeCenter, data.edges)
+        : buildGraphLayout([]),
+    [data, activeCenter],
+  );
+
+  const neighborMap = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const n of layout.nodes) map.set(n.path, new Set([n.path]));
+    for (const e of layout.edges) {
+      map.get(e.source)?.add(e.target);
+      map.get(e.target)?.add(e.source);
     }
-    return () => {
-      observer?.disconnect();
-      renderer?.kill();
+    return map;
+  }, [layout]);
+
+  const fitView = useCallback(
+    (w: number, h: number) => {
+      if (!layout.nodes.length || w <= 0 || h <= 0) return;
+      const { minX, minY, width: bw, height: bh } = layout.bounds;
+      const fitScale = Math.min(w / bw, h / bh, 1.15);
+      const scale = Math.max(0.18, fitScale);
+      const cx = minX + bw / 2;
+      const cy = minY + bh / 2;
+      setTransform({
+        x: w / 2 - cx * scale,
+        y: h / 2 - cy * scale,
+        scale,
+      });
+    },
+    [layout],
+  );
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const updateSize = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w > 0 && h > 0) {
+        setViewportSize((prev) =>
+          prev.width === w && prev.height === h ? prev : { width: w, height: h },
+        );
+      }
     };
-  }, [data, center, summary]);
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [data]);
+
+  useEffect(() => {
+    fitView(viewportSize.width, viewportSize.height);
+  }, [fitView, viewportSize.width, viewportSize.height]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cursorX = event.clientX - rect.left;
+      const cursorY = event.clientY - rect.top;
+      const factor = event.deltaY < 0 ? 1.14 : 1 / 1.14;
+      setTransform((prev) => {
+        const nextScale = Math.max(0.12, Math.min(3.5, prev.scale * factor));
+        const ratio = nextScale / prev.scale;
+        return {
+          scale: nextScale,
+          x: cursorX - (cursorX - prev.x) * ratio,
+          y: cursorY - (cursorY - prev.y) * ratio,
+        };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [data]);
+
+  function zoomBy(deltaFactor: number) {
+    const cx = viewportSize.width / 2;
+    const cy = viewportSize.height / 2;
+    setTransform((prev) => {
+      const nextScale = Math.max(0.12, Math.min(3.5, prev.scale * deltaFactor));
+      const ratio = nextScale / prev.scale;
+      return {
+        scale: nextScale,
+        x: cx - (cx - prev.x) * ratio,
+        y: cy - (cy - prev.y) * ratio,
+      };
+    });
+  }
 
   return (
     <section className="link-graph" aria-label="リンク図">
       <div className="link-graph-controls">
-        <button onClick={() => setSummary((v) => !v)}>
+        <button type="button" onClick={() => setSummary((v) => !v)}>
           {summary ? '文書単位の図' : 'フォルダー集約図'}
+        </button>
+        <button
+          type="button"
+          aria-label="図を縮小"
+          onClick={() => zoomBy(1 / 1.2)}
+        >
+          −
+        </button>
+        <output className="graph-zoom-readout" aria-label="図の倍率">
+          {Math.round(transform.scale * 100)}%
+        </output>
+        <button
+          type="button"
+          aria-label="図を拡大"
+          onClick={() => zoomBy(1.2)}
+        >
+          ＋
+        </button>
+        <button
+          type="button"
+          onClick={() => fitView(viewportSize.width, viewportSize.height)}
+        >
+          全体を表示
         </button>
         <button
           type="button"
@@ -128,6 +245,13 @@ export function GraphView({
         >
           {expanded ? 'リンク図を元に戻す（Esc）' : 'リンク図を拡大'}
         </button>
+        {!summary && center && (
+          <span className="graph-legend" aria-label="凡例">
+            <span className="legend-item incoming">← 左: 参照元・呼び出し元</span>
+            <span className="legend-item center">■ 中央: 選択文書</span>
+            <span className="legend-item outgoing">右: 参照先・呼び出し先 →</span>
+          </span>
+        )}
       </div>
       <h2>
         {summary
@@ -139,12 +263,263 @@ export function GraphView({
       <p className="hint">
         {summary
           ? '全体の文書をフォルダー階層別に集約しています。OMLの生成フォルダーは元仕様書名で表示します。'
-          : '橙色は選択文書への参照、青色は選択文書からの参照です。太線は処理フローで確認した呼び出しです。矢印は参照先を指します。ノードからWikiを開けます。'}
+          : center
+            ? '左側に参照元（橙色）、右側に参照先（青色）を整列しています。太線は処理フローで確認した呼び出しです。カードをクリックするとWikiを開きます。'
+            : '太線は処理フローで確認した呼び出しです。カードに重ねると関係先を強調し、クリックでWikiを開きます。'}
         ドラッグ・ホイールで移動／拡大できます。
       </p>
       {error && <p role="alert">{error}</p>}
       {!data && !error && <p>リンク図を読み込んでいます…</p>}
-      <div className="graph-canvas" ref={container} />
+
+      <div
+        className="graph-canvas"
+        ref={containerRef}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          dragRef.current = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+            originX: transform.x,
+            originY: transform.y,
+            moved: false,
+          };
+        }}
+        onPointerMove={(e) => {
+          const drag = dragRef.current;
+          if (!drag || drag.pointerId !== e.pointerId) return;
+          const dx = e.clientX - drag.startX;
+          const dy = e.clientY - drag.startY;
+          if (Math.hypot(dx, dy) > 4) {
+            drag.moved = true;
+          }
+          if (drag.moved) {
+            setTransform((prev) => ({
+              ...prev,
+              x: drag.originX + dx,
+              y: drag.originY + dy,
+            }));
+          }
+        }}
+        onPointerUp={() => {
+          setTimeout(() => {
+            dragRef.current = null;
+          }, 0);
+        }}
+        onPointerCancel={() => {
+          dragRef.current = null;
+        }}
+      >
+        {layout.nodes.length > 0 && (
+          <svg
+            className="graph-svg"
+            width="100%"
+            height="100%"
+            aria-label="関係図キャンバス"
+          >
+            <defs>
+              <marker
+                id="graph-arrow-incoming"
+                viewBox="0 0 10 8"
+                refX="9"
+                refY="4"
+                markerUnits="userSpaceOnUse"
+                markerWidth="9"
+                markerHeight="7.5"
+                orient="auto"
+              >
+                <path d="M 0 0.5 L 9.5 4 L 0 7.5 z" fill="#b35d21" />
+              </marker>
+              <marker
+                id="graph-arrow-outgoing"
+                viewBox="0 0 10 8"
+                refX="9"
+                refY="4"
+                markerUnits="userSpaceOnUse"
+                markerWidth="9"
+                markerHeight="7.5"
+                orient="auto"
+              >
+                <path d="M 0 0.5 L 9.5 4 L 0 7.5 z" fill="#246bb0" />
+              </marker>
+              <marker
+                id="graph-arrow-neutral"
+                viewBox="0 0 10 8"
+                refX="9"
+                refY="4"
+                markerUnits="userSpaceOnUse"
+                markerWidth="8.5"
+                markerHeight="7"
+                orient="auto"
+              >
+                <path d="M 0 0.5 L 9.5 4 L 0 7.5 z" fill="#7c968e" />
+              </marker>
+            </defs>
+
+            <g
+              transform={`translate(${transform.x}, ${transform.y}) scale(${transform.scale})`}
+            >
+              <g className="graph-edges">
+                {layout.edges.map((edge) => {
+                  const touchesHovered =
+                    hovered !== null &&
+                    (edge.source === hovered || edge.target === hovered);
+                  const dimmed = hovered !== null && !touchesHovered;
+                  const effectiveRole = touchesHovered
+                    ? edge.source === hovered
+                      ? 'outgoing'
+                      : 'incoming'
+                    : edge.role;
+                  const stroke =
+                    effectiveRole === 'incoming'
+                      ? '#b35d21'
+                      : effectiveRole === 'outgoing'
+                        ? '#246bb0'
+                        : '#96ada6';
+                  const markerId =
+                    effectiveRole === 'incoming'
+                      ? 'url(#graph-arrow-incoming)'
+                      : effectiveRole === 'outgoing'
+                        ? 'url(#graph-arrow-outgoing)'
+                        : 'url(#graph-arrow-neutral)';
+                  const strokeWidth = edge.call
+                    ? touchesHovered
+                      ? 2.6
+                      : 2.2
+                    : touchesHovered
+                      ? 1.8
+                      : 1.35;
+
+                  return (
+                    <g key={`${edge.source}->${edge.target}`}>
+                      <path
+                        d={edge.pathD}
+                        fill="none"
+                        stroke="#fcfefd"
+                        strokeWidth={strokeWidth + 3.2}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        opacity={dimmed ? 0.05 : 0.96}
+                      />
+                      <path
+                        d={edge.pathD}
+                        fill="none"
+                        stroke={stroke}
+                        strokeWidth={strokeWidth}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        opacity={dimmed ? 0.14 : 0.95}
+                        markerEnd={markerId}
+                      />
+                    </g>
+                  );
+                })}
+              </g>
+
+              <g className="graph-nodes">
+                {layout.nodes.map((node, index) => {
+                  const isHovered = hovered === node.path;
+                  const connected =
+                    hovered === null ||
+                    Boolean(neighborMap.get(hovered)?.has(node.path));
+                  const palette = cardPalette(node.role, isHovered);
+                  const left = node.x - node.width / 2;
+                  const top = node.y - node.height / 2;
+                  const isCenter = node.role === 'center';
+                  const mainFontSize = isCenter ? 13.5 : 12.5;
+                  const mainBaseline0 = node.prefix
+                    ? GRAPH_LABEL.mainBaselineWithPrefix
+                    : GRAPH_LABEL.mainBaseline;
+
+                  return (
+                    <g
+                      key={node.path}
+                      transform={`translate(${left}, ${top})`}
+                      className={`graph-card ${summary ? 'summary-card' : 'clickable-card'}`}
+                      opacity={connected ? 1 : 0.24}
+                      role={summary ? undefined : 'button'}
+                      tabIndex={summary ? undefined : 0}
+                      aria-label={node.title}
+                      onMouseEnter={() => setHovered(node.path)}
+                      onMouseLeave={() =>
+                        setHovered((prev) => (prev === node.path ? null : prev))
+                      }
+                      onClick={() => {
+                        if (summary || dragRef.current?.moved) return;
+                        onOpen(node.path);
+                      }}
+                      onKeyDown={(e) => {
+                        if (
+                          !summary &&
+                          (e.key === 'Enter' || e.key === ' ')
+                        ) {
+                          e.preventDefault();
+                          onOpen(node.path);
+                        }
+                      }}
+                    >
+                      <title>{`${node.title}${summary ? '' : `\n${node.path}`}`}</title>
+                      <rect
+                        width={node.width}
+                        height={node.height}
+                        rx={8}
+                        ry={8}
+                        fill={palette.fill}
+                        stroke={palette.stroke}
+                        strokeWidth={palette.strokeWidth}
+                      />
+                      <rect
+                        x={6}
+                        y={8}
+                        width={3.5}
+                        height={Math.max(12, node.height - 16)}
+                        rx={1.75}
+                        fill={palette.accent}
+                      />
+                      <clipPath id={`graph-label-${index}`}>
+                        <rect
+                          x={14}
+                          y={2}
+                          width={Math.max(20, node.width - 22)}
+                          height={Math.max(8, node.height - 4)}
+                        />
+                      </clipPath>
+                      <g clipPath={`url(#graph-label-${index})`}>
+                        {node.prefix && (
+                          <text
+                            x={GRAPH_LABEL.x}
+                            y={GRAPH_LABEL.prefixBaseline}
+                            fontSize={10.5}
+                            fontWeight={600}
+                            fill={palette.prefix}
+                          >
+                            {node.prefix}
+                          </text>
+                        )}
+                        {node.mainLines.map((line, lineIndex) => (
+                          <text
+                            key={lineIndex}
+                            x={GRAPH_LABEL.x}
+                            y={
+                              mainBaseline0 + lineIndex * GRAPH_LABEL.lineHeight
+                            }
+                            fontSize={mainFontSize}
+                            fontWeight={isCenter ? 700 : 600}
+                            fill={palette.text}
+                          >
+                            {line}
+                          </text>
+                        ))}
+                      </g>
+                    </g>
+                  );
+                })}
+              </g>
+            </g>
+          </svg>
+        )}
+      </div>
+
       {data && (
         <>
           <p>
