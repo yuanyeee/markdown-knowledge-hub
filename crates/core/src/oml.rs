@@ -118,6 +118,23 @@ fn literal(value: &str) -> String {
 }
 
 /// Compile OML Utilities Markdown exports into a separate Wiki input directory.
+fn yaml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn okf_header(kind: &str, generated_at: &str) -> String {
+    let kind = if kind.trim().is_empty() {
+        "要素"
+    } else {
+        kind
+    };
+    format!(
+        "---\ntype: {}\ngenerated:\n  by: process:oml-wiki\n  at: {}\n---\n\n",
+        yaml_quote(kind),
+        yaml_quote(generated_at)
+    )
+}
+
 pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
     let input = input
         .canonicalize()
@@ -269,11 +286,14 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
         }
     }
     fs::create_dir(&destination)?;
-    let mut index = String::from("# OML Wiki\n\n## モジュール一覧\n\n");
+    let generated_at = crate::okf::utc_now();
+    let mut index =
+        String::from("---\nokf_version: \"0.2\"\n---\n\n# OML Wiki\n\n## モジュール一覧\n\n");
     for (id, spec) in specs.iter().enumerate() {
         index.push_str(&format!("- [{}]({})\n", literal(&spec.name), page(id)));
         let mut body = format!(
-            "# {}\n\n出典　{}\n\n## モジュール依存\n\n{}",
+            "{}# {}\n\n出典　{}\n\n## モジュール依存\n\n{}",
+            okf_header("モジュール", &generated_at),
             literal(&spec.name),
             literal(&spec.path.to_string_lossy()),
             dependencies[id]
@@ -368,7 +388,8 @@ pub fn compile_oml_wiki(input: &Path, destination: &Path) -> Result<OmlReport> {
                     })
                     .unwrap_or_default();
                 let mut content = format!(
-                    "# {title}\n\n[元仕様書ページ](../{module_page}{fragment}) · {} {} 行\n\n{}",
+                    "{}# {title}\n\n[元仕様書ページ](../{module_page}{fragment}) · {} {} 行\n\n{}",
+                    okf_header(element.kind, &generated_at),
                     literal(&source.to_string_lossy()),
                     element.line,
                     crate::oml_elements::route_links(
@@ -760,7 +781,73 @@ mod tests {
             .find(|hit| hit.title == "Shared")
             .context("Shared Wiki page missing")?;
         assert_eq!(hub.backlinks("oml", &shared.path)?.len(), 2);
-        assert_eq!(hub.graph("oml", Some(&shared.path), 50)?.edges.len(), 3);
+        let graph = hub.graph("oml", Some(&shared.path), 50)?;
+        assert!(graph.nodes.iter().all(|node| node.path != "index.md"));
+        assert_eq!(graph.edges.len(), 1);
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.source == shared.path || edge.target == shared.path)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generated_pages_declare_okf_type_without_human_verification() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let wiki = temp.path().join("wiki");
+        fs::create_dir(&input)?;
+        fs::write(
+            input.join("Orders.md"),
+            "# Orders モジュール仕様書\n\n# 画面: Edit\n\n本文\n",
+        )?;
+        compile_oml_wiki(&input, &wiki)?;
+        for entry in walkdir::WalkDir::new(&wiki) {
+            let entry = entry?;
+            if !entry.file_type().is_file()
+                || entry.path().extension().is_none_or(|ext| ext != "md")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(entry.path())?;
+            let frontmatter = text
+                .split_once("\n---\n")
+                .map(|(head, _)| head)
+                .unwrap_or("");
+            assert!(
+                frontmatter.starts_with("---\n"),
+                "{}",
+                entry.path().display()
+            );
+            assert!(!text.contains("human:"), "{}", entry.path().display());
+            if entry.file_name() == "index.md" {
+                assert!(frontmatter.contains("okf_version:"));
+                assert!(!frontmatter.contains("type:"));
+            } else {
+                assert!(frontmatter.contains("type:"));
+                assert!(frontmatter.contains("process:oml-wiki"));
+            }
+        }
+        let mut hub = Hub::open(&temp.path().join("state"))?;
+        hub.register("oml", "OML", &wiki)?;
+        hub.scan("oml")?;
+        assert!(hub.stats("oml")?.okf);
+        assert!(
+            hub.diagnostics_page("oml", "missing-type", 0, 50)?
+                .items
+                .is_empty()
+        );
+        let screen = hub
+            .search("oml", "Edit")?
+            .into_iter()
+            .find(|hit| hit.title == "画面 · Edit")
+            .context("screen page")?;
+        let document = serde_json::to_value(hub.reading_document("oml", &screen.path, "")?)?;
+        assert_eq!(document["okf"]["kind"], "画面");
+        assert_eq!(document["okf"]["generated_by"], "process:oml-wiki");
+        assert_eq!(document["okf"]["trust"], "unverified");
         Ok(())
     }
 }

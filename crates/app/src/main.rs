@@ -356,7 +356,7 @@ async fn document_links(State(data): State<PathBuf>, Query(p): Query<LinkParamet
 async fn search_page(State(data): State<PathBuf>, Query(p): Query<LinkParameters>) -> ApiResult {
     run(data, move |h| {
         Ok(serde_json::to_value(h.search_page_scoped(
-            &p.project, &p.q, &p.source, p.offset, p.limit,
+            &p.project, &p.q, &p.source, p.offset, p.limit, &p.kind,
         )?)?)
     })
     .await

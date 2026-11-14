@@ -156,7 +156,7 @@ impl Hub {
             [],
             |r| r.get(0),
         )?;
-        let paths = if version < 5 {
+        let paths = if version < crate::okf::PARSER_VERSION {
             if let Some(paths) = paths {
                 let root = self.root(id)?;
                 for path in paths {
@@ -197,7 +197,11 @@ impl Hub {
 
     fn unchanged_metadata(&self, id: &str) -> Result<Option<usize>> {
         let db = self.db(id)?;
-        let ready:bool=db.query_row("SELECT (SELECT value FROM state WHERE key='dirty')=0 AND (SELECT value FROM state WHERE key='parser_version')>=5",[],|r|r.get(0))?;
+        let ready: bool = db.query_row(
+            "SELECT (SELECT value FROM state WHERE key='dirty')=0 AND (SELECT value FROM state WHERE key='parser_version')>=?1",
+            [crate::okf::PARSER_VERSION],
+            |r| r.get(0),
+        )?;
         if !ready {
             return Ok(None);
         }

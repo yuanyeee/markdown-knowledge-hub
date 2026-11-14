@@ -3,6 +3,7 @@ mod generations;
 mod monitor;
 mod outputs;
 pub use outputs::{MigrationReport, RetiredOutput};
+mod okf;
 mod pages;
 mod parser;
 mod tokenizer;
@@ -580,6 +581,126 @@ mod tests {
         let links = hub.links("one").unwrap();
         assert_eq!(links.iter().filter(|l| l.status == "resolved").count(), 2);
         assert_eq!(links.iter().filter(|l| l.status == "missing").count(), 1);
+    }
+
+    #[test]
+    fn okf_metadata_is_optional_and_drives_trust_diagnostics_and_graph_labels() {
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("choice.md"),
+            "---\ntype: Decision\ntitle: 価格\ndescription: 価格の決め方\ntags: [価格]\nresource: https://example.test/pricing\nstale_after: \"2000-01-01T00:00:00Z\"\nstatus: draft\nverified:\n  by: human:ada\n  at: \"2026-01-01T00:00:00Z\"\nsources:\n  - title: 価格表\n    resource: https://example.test/sheet\n---\n# 見出し\n[ノート](note.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("machine.md"),
+            "---\ntype: Claim\nverified:\n  - by: agent:wiki\n    at: \"2026-01-01T00:00:00Z\"\nstale_after: \"2999-01-01\"\n---\n# 機械確認\n",
+        )
+        .unwrap();
+        std::fs::write(source.path().join("note.md"), "# メモ\n").unwrap();
+        std::fs::write(
+            source.path().join("broken.md"),
+            "---\n[broken\n---\n# 残る\n[価格](choice.md)\n",
+        )
+        .unwrap();
+        std::fs::write(source.path().join("log.md"), "# 記録\n").unwrap();
+        let mut hub = super::Hub::open(state.path()).unwrap();
+        hub.register("demo", "Demo", source.path()).unwrap();
+        hub.scan("demo").unwrap();
+
+        let before =
+            serde_json::to_value(hub.reading_document("demo", "choice.md", "").unwrap()).unwrap();
+        assert_eq!(before["title"], "価格");
+        assert_eq!(before["okf"]["kind"], "Decision");
+        assert_eq!(before["okf"]["trust"], "human-reviewed");
+        assert_eq!(before["okf"]["stale"], true);
+        assert_eq!(before["okf"]["description"], "価格の決め方");
+        assert_eq!(before["okf"]["sources"][0], "価格表");
+        let machine =
+            serde_json::to_value(hub.reading_document("demo", "machine.md", "").unwrap()).unwrap();
+        assert_eq!(machine["okf"]["trust"], "machine-confirmed");
+        assert_eq!(machine["okf"]["stale"], false);
+        assert!(
+            hub.diagnostics_page("demo", "missing-type", 0, 20)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(
+            hub.diagnostics_page("demo", "frontmatter-invalid", 0, 20)
+                .unwrap()
+                .items[0]
+                .path,
+            "broken.md"
+        );
+        assert_eq!(hub.stats("demo").unwrap().stale, 1);
+        assert!(!hub.stats("demo").unwrap().okf);
+        let browse = hub.search_page("demo", "", 0, 20).unwrap();
+        assert_eq!(
+            browse
+                .items
+                .iter()
+                .find(|hit| hit.path == "choice.md")
+                .unwrap()
+                .snippet
+                .as_deref(),
+            Some("価格の決め方")
+        );
+        let graph = hub.graph("demo", Some("choice.md"), 20).unwrap();
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.path == "choice.md")
+                .unwrap()
+                .title,
+            "Decision · 価格"
+        );
+        assert!(graph.nodes.iter().all(|node| node.path != "log.md"));
+        assert_eq!(
+            hub.links("demo")
+                .unwrap()
+                .iter()
+                .filter(|link| link.target.contains("choice.md") && link.status == "resolved")
+                .count(),
+            1
+        );
+
+        std::fs::write(
+            source.path().join("index.md"),
+            "---\nokf_version: \"0.2\"\n---\n# 目次\n[価格](choice.md)\n",
+        )
+        .unwrap();
+        hub.scan("demo").unwrap();
+        let missing = hub.diagnostics_page("demo", "missing-type", 0, 20).unwrap();
+        let missing_paths: Vec<_> = missing
+            .items
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect();
+        assert!(missing_paths.contains(&"note.md"));
+        assert!(!missing_paths.contains(&"index.md"));
+        assert!(!missing_paths.contains(&"log.md"));
+        assert!(!missing_paths.contains(&"broken.md"));
+        assert!(hub.stats("demo").unwrap().okf);
+        let filtered = hub
+            .search_page_scoped("demo", "", "", 0, 20, "Decision")
+            .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].path, "choice.md");
+        let centered = hub.graph("demo", Some("note.md"), 20).unwrap();
+        assert!(
+            centered
+                .nodes
+                .iter()
+                .all(|node| node.path != "index.md" || node.path == "note.md")
+        );
+        assert!(
+            centered
+                .nodes
+                .iter()
+                .all(|node| !node.path.ends_with("index.md"))
+        );
     }
 }
 

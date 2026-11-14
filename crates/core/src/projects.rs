@@ -16,6 +16,11 @@ pub struct ProjectStats {
     pub ambiguous: usize,
     pub isolated: usize,
     pub duplicate_names: usize,
+    pub stale: usize,
+    pub missing_type: usize,
+    pub frontmatter_invalid: usize,
+    pub okf: bool,
+    pub types: Vec<crate::okf::TypeCount>,
 }
 #[derive(Debug, Serialize)]
 pub struct GraphEdge {
@@ -205,6 +210,7 @@ impl Hub {
             [],
             |r| Ok(r.get::<_, i64>(0)? as usize),
         )?;
+        let knowledge = crate::okf::summary(&db)?;
         Ok(ProjectStats {
             documents,
             links,
@@ -213,6 +219,11 @@ impl Hub {
             ambiguous,
             isolated,
             duplicate_names,
+            stale: knowledge.stale,
+            missing_type: knowledge.missing_type,
+            frontmatter_invalid: knowledge.frontmatter_invalid,
+            okf: knowledge.bundle,
+            types: knowledge.types,
         })
     }
     /// Folder aggregation reads every resolved edge; document rendering caps do not apply.
@@ -345,7 +356,12 @@ impl Hub {
                 .query_map(params![center, limit as i64], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             truncated = neighbors.len() >= limit;
-            paths.extend(neighbors.into_iter().take(limit - 1));
+            paths.extend(
+                neighbors
+                    .into_iter()
+                    .filter(|path| !crate::okf::reserved_path(path))
+                    .take(limit - 1),
+            );
         } else {
             let wanted = limit + 1;
             let mut seen_paths = HashSet::new();
@@ -359,6 +375,9 @@ impl Hub {
             )?;
             for row in ranked.query_map([wanted as i64], |r| r.get::<_, String>(0))? {
                 let p = row?;
+                if crate::okf::reserved_path(&p) {
+                    continue;
+                }
                 if seen_paths.insert(p.clone()) {
                     paths.push(p);
                 }
@@ -367,6 +386,9 @@ impl Hub {
                 let mut fallback = db.prepare("SELECT path FROM docs ORDER BY path LIMIT ?1")?;
                 for row in fallback.query_map([wanted as i64], |r| r.get::<_, String>(0))? {
                     let p = row?;
+                    if crate::okf::reserved_path(&p) {
+                        continue;
+                    }
                     if seen_paths.insert(p.clone()) {
                         paths.push(p);
                         if paths.len() == wanted {
@@ -398,6 +420,12 @@ impl Hub {
             })? {
                 let (p, title) = row?;
                 title_map.insert(p, title);
+            }
+        }
+        let labels = crate::okf::kind_labels(&db, &paths)?;
+        for (path, title) in title_map.iter_mut() {
+            if let Some(kind) = labels.get(path) {
+                *title = crate::okf::with_type_label(title, kind);
             }
         }
         let nodes = paths

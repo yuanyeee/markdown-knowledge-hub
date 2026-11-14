@@ -227,6 +227,9 @@ impl Hub {
           CREATE INDEX IF NOT EXISTS links_status ON links(status);
           CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value INTEGER);
           CREATE TABLE IF NOT EXISTS state_text(key TEXT PRIMARY KEY,value TEXT);
+          CREATE TABLE IF NOT EXISTS okf(path TEXT PRIMARY KEY,concept INTEGER NOT NULL,kind TEXT,description TEXT,resource TEXT,tags TEXT,trust TEXT NOT NULL,stale_after TEXT,status TEXT,generated_by TEXT,sources TEXT,frontmatter_error TEXT);
+          CREATE INDEX IF NOT EXISTS okf_kind ON okf(kind);
+          CREATE INDEX IF NOT EXISTS okf_stale ON okf(stale_after);
           INSERT OR IGNORE INTO state VALUES('dirty',0);
           INSERT OR IGNORE INTO state VALUES('parser_version',0);")?;
         Ok(db)
@@ -319,7 +322,7 @@ impl Hub {
             [],
             |r| r.get(0),
         )?;
-        let reparse = rebuild || version < 5;
+        let reparse = rebuild || version < crate::okf::PARSER_VERSION;
         let verify = verify || reparse;
         let mut old = HashMap::new();
         {
@@ -405,7 +408,10 @@ impl Hub {
         if candidates.is_empty() && deleted.is_empty() {
             let tx = db.transaction()?;
             tx.execute("UPDATE state SET value=0 WHERE key='dirty'", [])?;
-            tx.execute("UPDATE state SET value=5 WHERE key='parser_version'", [])?;
+            tx.execute(
+                "UPDATE state SET value=?1 WHERE key='parser_version'",
+                [crate::okf::PARSER_VERSION],
+            )?;
             self.commit_generation(id, &tx, before_publish)?;
             tx.commit()?;
             return Ok(report);
@@ -413,6 +419,7 @@ impl Hub {
         let tx = db.transaction()?;
         tx.execute("UPDATE state SET value=1 WHERE key='dirty'", [])?;
         let mut affected_names = HashSet::new();
+        let mut bundle_update: Option<Option<String>> = None;
         for path in &deleted {
             affected_names.insert(link_key(path));
             let mut statement = tx.prepare("SELECT name FROM aliases WHERE path=?1")?;
@@ -425,6 +432,10 @@ impl Hub {
             tx.execute("DELETE FROM aliases WHERE path=?1", [path])?;
             tx.execute("DELETE FROM headings WHERE path=?1", [path])?;
             tx.execute("DELETE FROM links WHERE source=?1", [path])?;
+            crate::okf::remove(&tx, path)?;
+            if path == "index.md" {
+                bundle_update = Some(None);
+            }
         }
         let mut documents = vec![];
         // Bound raw/parsed payloads to 16 documents, including full initial scans.
@@ -494,6 +505,10 @@ impl Hub {
                             c.raw
                         ],
                     )?;
+                    crate::okf::persist(&tx, &c.path, &p.okf)?;
+                    if c.path == "index.md" {
+                        bundle_update = Some(p.okf.okf_version.clone());
+                    }
                     if let Some(stem) = Path::new(&c.path).file_stem().and_then(|s| s.to_str()) {
                         tx.execute(
                             "INSERT OR REPLACE INTO doc_stems VALUES(?1,?2)",
@@ -544,7 +559,13 @@ impl Hub {
             }
             resolve(&tx, Some(&sources.into_iter().collect::<Vec<_>>()))?;
         }
-        tx.execute("UPDATE state SET value=5 WHERE key='parser_version'", [])?;
+        if let Some(version) = bundle_update.as_ref() {
+            crate::okf::set_bundle(&tx, version.as_deref())?;
+        }
+        tx.execute(
+            "UPDATE state SET value=?1 WHERE key='parser_version'",
+            [crate::okf::PARSER_VERSION],
+        )?;
         if content_changed {
             let mut statement = tx.prepare("SELECT path,title,body FROM docs WHERE path=?1")?;
             index.update(
@@ -567,33 +588,40 @@ impl Hub {
         }
         let db = self.db(id)?;
         if q.trim().is_empty() {
-            let mut s = db.prepare("SELECT path,title FROM docs ORDER BY path LIMIT 50")?;
-            return Ok(s
-                .query_map([], |r| {
+            let mut items = {
+                let mut s = db.prepare("SELECT path,title FROM docs ORDER BY path LIMIT 50")?;
+                s.query_map([], |r| {
                     Ok(SearchHit {
                         path: r.get(0)?,
                         title: r.get(1)?,
                         snippet: None,
                     })
                 })?
-                .collect::<rusqlite::Result<_>>()?);
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            crate::okf::fill_descriptions(&db, &mut items)?;
+            return Ok(items);
         }
         let dir = self.index_dir_in_snapshot(id, &db)?;
-        let mut doc_stmt =
-            db.prepare("SELECT path,title,substr(body,1,16384) FROM docs WHERE path=?1")?;
-        Search::cached(&dir.join("search"))?
-            .query(q)?
-            .into_iter()
-            .map(|p| {
-                let (path, title, body): (String, String, String) =
-                    doc_stmt.query_row([p], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-                Ok(SearchHit {
-                    snippet: extract_snippet(&body, q),
-                    path,
-                    title,
+        let mut items = {
+            let mut doc_stmt =
+                db.prepare("SELECT path,title,substr(body,1,16384) FROM docs WHERE path=?1")?;
+            Search::cached(&dir.join("search"))?
+                .query(q)?
+                .into_iter()
+                .map(|p| {
+                    let (path, title, body): (String, String, String) =
+                        doc_stmt.query_row([p], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                    Ok(SearchHit {
+                        snippet: extract_snippet(&body, q),
+                        path,
+                        title,
+                    })
                 })
-            })
-            .collect()
+                .collect::<Result<Vec<_>>>()?
+        };
+        crate::okf::fill_descriptions(&db, &mut items)?;
+        Ok(items)
     }
     pub fn document(&self, id: &str, path: &str) -> Result<Document> {
         let _lock = self.project_lock(id, true)?;

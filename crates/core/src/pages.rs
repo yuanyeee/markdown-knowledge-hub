@@ -35,7 +35,7 @@ impl Hub {
         offset: usize,
         limit: usize,
     ) -> Result<Page<SearchHit>> {
-        self.search_page_scoped(id, q, "", offset, limit)
+        self.search_page_scoped(id, q, "", offset, limit, "")
     }
 
     pub fn search_page_scoped(
@@ -45,6 +45,7 @@ impl Hub {
         source: &str,
         offset: usize,
         limit: usize,
+        kind: &str,
     ) -> Result<Page<SearchHit>> {
         if !source.is_empty()
             && !source
@@ -60,21 +61,27 @@ impl Hub {
         if q.len() > 1024 {
             bail!("検索語が長すぎます");
         }
+        if kind.chars().count() > 80 {
+            bail!("種別の指定が長すぎます");
+        }
         let _lock = self.project_lock(id, true)?;
         let db = self.db(id)?;
         let mut items = vec![];
         if q.trim().is_empty() {
-            let mut s = db.prepare(
-                "SELECT path,title FROM docs WHERE ?3='' OR path=?3 OR substr(path,1,length(?4))=?4 ORDER BY path LIMIT ?1 OFFSET ?2",
-            )?;
+            let prefix = format!("{}/", source.trim_end_matches(".md"));
+            let has_okf = crate::okf::table_exists(&db)?;
+            if !kind.is_empty() && !has_okf {
+                return Ok(page(items, offset, limit));
+            }
+            let sql = if has_okf {
+                "SELECT d.path,d.title FROM docs d LEFT JOIN okf o ON o.path=d.path WHERE (?3='' OR d.path=?3 OR substr(d.path,1,length(?4))=?4) AND (?5='' OR o.kind=?5) ORDER BY d.path LIMIT ?1 OFFSET ?2"
+            } else {
+                "SELECT path,title FROM docs WHERE (?3='' OR path=?3 OR substr(path,1,length(?4))=?4) AND ?5='' ORDER BY path LIMIT ?1 OFFSET ?2"
+            };
+            let mut s = db.prepare(sql)?;
             items = s
                 .query_map(
-                    params![
-                        (limit + 1) as i64,
-                        offset as i64,
-                        source,
-                        format!("{}/", source.trim_end_matches(".md"))
-                    ],
+                    params![(limit + 1) as i64, offset as i64, source, prefix, kind],
                     |r| {
                         Ok(SearchHit {
                             path: r.get(0)?,
@@ -84,6 +91,30 @@ impl Hub {
                     },
                 )?
                 .collect::<rusqlite::Result<_>>()?;
+        } else if !kind.is_empty() {
+            let allowed = crate::okf::paths_of_kind(&db, kind)?;
+            let dir = self.index_dir_in_snapshot(id, &db)?;
+            let prefix = format!("{}/", source.trim_end_matches(".md"));
+            let mut doc_stmt =
+                db.prepare("SELECT path,title,substr(body,1,16384) FROM docs WHERE path=?1")?;
+            for path in Search::cached(&dir.join("search"))?
+                .query(q)?
+                .into_iter()
+                .filter(|path| {
+                    allowed.contains(path)
+                        && (source.is_empty() || path == source || path.starts_with(&prefix))
+                })
+                .skip(offset)
+                .take(limit + 1)
+            {
+                let (p, title, body): (String, String, String) =
+                    doc_stmt.query_row([&path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                items.push(SearchHit {
+                    snippet: crate::store::extract_snippet(&body, q),
+                    path: p,
+                    title,
+                });
+            }
         } else {
             // Resolve both stores from the same generation, even if publication occurs now.
             let dir = self.index_dir_in_snapshot(id, &db)?;
@@ -104,6 +135,7 @@ impl Hub {
                 });
             }
         }
+        crate::okf::fill_descriptions(&db, &mut items)?;
         Ok(page(items, offset, limit))
     }
     pub fn backlinks_page(
@@ -239,6 +271,55 @@ impl Hub {
                         .collect()
                 }
             }
+            "stale" | "missing-type" | "frontmatter-invalid" => {
+                if !crate::okf::table_exists(&db)? {
+                    Vec::new()
+                } else {
+                    let now = crate::okf::utc_now();
+                    let (sql, binds): (&str, Vec<&str>) = match kind {
+                        "stale" => (
+                            "SELECT d.path, d.title, o.stale_after
+                             FROM okf o JOIN docs d ON d.path=o.path
+                             WHERE o.stale_after IS NOT NULL AND o.stale_after<=?1
+                             ORDER BY o.stale_after, d.path LIMIT ?2 OFFSET ?3",
+                            vec![now.as_str()],
+                        ),
+                        "missing-type" => (
+                            "SELECT d.path, d.title, NULL
+                             FROM docs d JOIN okf o ON o.path=d.path
+                             WHERE o.concept=1 AND (o.kind IS NULL OR o.kind='')
+                               AND (o.frontmatter_error IS NULL OR o.frontmatter_error='')
+                               AND EXISTS(SELECT 1 FROM state_text WHERE key='okf_version' AND value<>'')
+                             ORDER BY d.path LIMIT ?1 OFFSET ?2",
+                            vec![],
+                        ),
+                        _ => (
+                            "SELECT d.path, d.title, o.frontmatter_error
+                             FROM okf o JOIN docs d ON d.path=o.path
+                             WHERE o.frontmatter_error IS NOT NULL AND o.frontmatter_error<>''
+                             ORDER BY d.path LIMIT ?1 OFFSET ?2",
+                            vec![],
+                        ),
+                    };
+                    let mut statement = db.prepare(sql)?;
+                    let mut values: Vec<rusqlite::types::Value> = binds
+                        .into_iter()
+                        .map(|value| rusqlite::types::Value::Text(value.to_string()))
+                        .collect();
+                    values.push(rusqlite::types::Value::Integer(fetch_limit));
+                    values.push(rusqlite::types::Value::Integer(fetch_offset));
+                    let params = rusqlite::params_from_iter(values);
+                    statement
+                        .query_map(params, |row| {
+                            Ok(DiagnosticItem {
+                                path: row.get(0)?,
+                                title: row.get(1)?,
+                                detail: row.get(2)?,
+                            })
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                }
+            }
             _ => bail!("未対応の診断種別です: {kind}"),
         };
         Ok(page(items, offset, limit))
@@ -324,15 +405,15 @@ mod scoped_search_tests {
         hub.scan("demo")?;
         let all = hub.search_page("demo", "Needle", 0, 10)?;
         assert_eq!(all.items.len(), 3);
-        let first = hub.search_page_scoped("demo", "Needle", &root, 0, 1)?;
+        let first = hub.search_page_scoped("demo", "Needle", &root, 0, 1, "")?;
         assert_eq!(first.next_offset, Some(1));
-        let next = hub.search_page_scoped("demo", "Needle", &root, 1, 1)?;
+        let next = hub.search_page_scoped("demo", "Needle", &root, 1, 1, "")?;
         assert_eq!(next.next_offset, None);
         let paths = [first.items[0].path.as_str(), next.items[0].path.as_str()];
         assert!(paths.contains(&root.as_str()));
         assert!(paths.contains(&format!("{source}/1.md").as_str()));
         assert!(
-            hub.search_page_scoped("demo", "Needle", "../data.md", 0, 1)
+            hub.search_page_scoped("demo", "Needle", "../data.md", 0, 1, "")
                 .is_err()
         );
         Ok(())

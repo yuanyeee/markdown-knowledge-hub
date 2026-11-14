@@ -6,56 +6,40 @@ pub struct Parsed {
     pub links: Vec<String>,
     pub aliases: Vec<String>,
     pub headings: Vec<String>,
+    pub okf: crate::okf::Record,
 }
 
 pub fn parse(raw: &str, fallback: &str) -> anyhow::Result<Parsed> {
     let normalized = raw.replace("\r\n", "\n");
-    let (metadata, content) = if let Some(rest) = normalized.strip_prefix("---\n") {
-        if let Some((metadata, content)) = rest.split_once("\n---\n") {
-            anyhow::ensure!(
-                metadata.len() <= 64 * 1024,
-                "frontmatterは64KiB以下で指定してください"
-            );
-            (
-                Some(serde_yaml_ng::from_str::<serde_yaml_ng::Value>(metadata)?),
-                content,
-            )
-        } else {
-            (None, normalized.as_str())
-        }
-    } else {
-        (None, normalized.as_str())
+    let (metadata, content, frontmatter_error) = split_frontmatter(&normalized)?;
+    let mut okf = crate::okf::Record {
+        concept: !crate::okf::reserved_path(fallback),
+        error: frontmatter_error,
+        ..crate::okf::Record::default()
     };
-    let aliases = metadata
-        .as_ref()
-        .and_then(|m| m.get("aliases"))
-        .map(|v| {
-            if let Some(s) = v.as_str() {
-                Ok(vec![s.to_string()])
-            } else if let Some(values) = v.as_sequence() {
-                values
-                    .iter()
-                    .map(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .ok_or_else(|| anyhow::anyhow!("aliasesには文字列を指定してください"))
-                    })
-                    .collect()
-            } else {
-                anyhow::bail!("aliasesには文字列または配列を指定してください")
+    if let Some(metadata) = &metadata {
+        crate::okf::apply(&mut okf, metadata);
+    }
+    let aliases = match metadata.as_ref().map(read_aliases).transpose() {
+        Ok(Some(aliases)) => aliases,
+        Ok(None) => Vec::new(),
+        Err(message) => {
+            if okf.error.is_none() {
+                okf.error = Some(message);
             }
-        })
-        .transpose()?
-        .unwrap_or_default();
+            Vec::new()
+        }
+    };
     let mut out = Parsed {
-        title: String::new(),
+        title: okf.title.clone().unwrap_or_default(),
         text: String::new(),
         links: vec![],
         aliases,
         headings: vec![],
+        okf,
     };
     let mut heading = false;
-    let mut first_heading = false;
+    let mut first_heading = !out.title.is_empty();
     let mut code = false;
     let mut current_heading: Option<String> = None;
     let mut heading_counts = std::collections::HashMap::<String, usize>::new();
@@ -129,6 +113,57 @@ pub fn parse(raw: &str, fallback: &str) -> anyhow::Result<Parsed> {
         out.title = fallback.to_string();
     }
     Ok(out)
+}
+
+fn split_frontmatter(
+    normalized: &str,
+) -> anyhow::Result<(Option<serde_yaml_ng::Value>, &str, Option<String>)> {
+    let Some(rest) = normalized.strip_prefix("---\n") else {
+        return Ok((None, normalized, None));
+    };
+    let Some((metadata, content)) = rest.split_once("\n---\n") else {
+        return Ok((None, normalized, None));
+    };
+    anyhow::ensure!(
+        metadata.len() <= 64 * 1024,
+        "frontmatterは64KiB以下で指定してください"
+    );
+    match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(metadata) {
+        Ok(value) if matches!(value, serde_yaml_ng::Value::Mapping(_)) => {
+            Ok((Some(value), content, None))
+        }
+        Ok(_) => Ok((
+            None,
+            content,
+            Some("frontmatterはキーと値で指定してください".to_string()),
+        )),
+        Err(_) => Ok((
+            None,
+            content,
+            Some("frontmatterを読み取れません".to_string()),
+        )),
+    }
+}
+
+fn read_aliases(metadata: &serde_yaml_ng::Value) -> Result<Vec<String>, String> {
+    let Some(value) = metadata.get("aliases") else {
+        return Ok(Vec::new());
+    };
+    if let Some(alias) = value.as_str() {
+        return Ok(vec![alias.to_string()]);
+    }
+    let Some(values) = value.as_sequence() else {
+        return Err("aliasesには文字列または配列を指定してください".to_string());
+    };
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "aliasesには文字列を指定してください".to_string())
+        })
+        .collect()
 }
 
 pub fn heading_id(text: &str) -> String {
