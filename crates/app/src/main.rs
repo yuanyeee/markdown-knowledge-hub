@@ -14,8 +14,9 @@ mod admin;
 #[derive(Parser)]
 #[command(about = "読み取り専用Markdown索引基盤")]
 struct Args {
-    #[arg(long, default_value = ".hub")]
-    data: PathBuf,
+    /// 索引と設定のディレクトリ。MCP以外は省略時 `.hub`。
+    #[arg(long)]
+    data: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -88,19 +89,37 @@ enum Command {
         #[arg(long)]
         web_dir: Option<PathBuf>,
     },
+    /// ローカルMCPをstdioで起動する。search と read だけを公開する。
+    Mcp {
+        /// Claude / Gemini CLI / Antigravity 向けの設定例を出して終了する。
+        #[arg(long)]
+        print_config: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Command::Mcp { print_config } = &args.command {
+        let data = args
+            .data
+            .clone()
+            .unwrap_or_else(hub_service::desktop_data_dir);
+        if *print_config {
+            hub_service::print_mcp_config(&std::env::current_exe()?, "--data", &data)?;
+            return Ok(());
+        }
+        return hub_service::serve_mcp(&data);
+    }
+    let data = args.data.clone().unwrap_or_else(|| PathBuf::from(".hub"));
     if let Command::CompileOmlWiki { input, destination } = &args.command {
         let report = hub_core::compile_oml_wiki(input, destination)?;
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
-    let mut hub = Hub::open(&args.data)?;
+    let mut hub = Hub::open(&data)?;
     let value = match args.command {
-        Command::CompileOmlWiki { .. } => unreachable!(),
+        Command::CompileOmlWiki { .. } | Command::Mcp { .. } => unreachable!(),
         Command::Add {
             id,
             name,
@@ -160,7 +179,7 @@ async fn main() -> Result<()> {
             port,
         } => {
             drop(hub);
-            let mut app = app_router_with_port(args.data.clone(), admin, port);
+            let mut app = app_router_with_port(data, admin, port);
             if let Some(path) = web_dir {
                 anyhow::ensure!(
                     path.join("index.html").is_file(),

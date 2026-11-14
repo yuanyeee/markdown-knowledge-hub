@@ -101,7 +101,55 @@ async fn hub_request(
     }).await.map_err(|e|e.to_string())?
 }
 
+fn wants_mcp(args: &[String]) -> bool {
+    args.iter().skip(1).any(|arg| arg == "mcp")
+}
+
+fn run_mcp(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let data = data_override(args)?.unwrap_or_else(hub_service::desktop_data_dir);
+    if args.iter().any(|arg| arg == "--print-config") {
+        let exe =
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("markdown-knowledge-hub"));
+        let text = hub_service::mcp_config_text(&exe, "--data-dir", &data)?;
+        write_mcp_config(&text);
+        return Ok(());
+    }
+    hub_service::serve_mcp(&data)?;
+    Ok(())
+}
+
+fn write_mcp_config(text: &str) {
+    #[cfg(windows)]
+    if write_windows_console(text) {
+        return;
+    }
+    println!("{text}");
+}
+
+#[cfg(windows)]
+fn write_windows_console(text: &str) -> bool {
+    use std::io::Write;
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    if unsafe { AttachConsole(u32::MAX) } == 0 {
+        return false;
+    }
+    let Ok(mut console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") else {
+        return false;
+    };
+    writeln!(console, "{text}").is_ok()
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if wants_mcp(&args) {
+        if let Err(error) = run_mcp(&args) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let result = tauri::Builder::default()
         .setup(|app| {
             let args: Vec<_> = std::env::args().collect();
@@ -136,5 +184,18 @@ mod tests {
             data_override(&["--data-dir".into(), r"D:\HubState".into()]).unwrap(),
             Some(PathBuf::from(r"D:\HubState"))
         );
+    }
+    #[test]
+    fn mcp_argument_is_exact_and_precedes_the_window() {
+        assert!(!wants_mcp(&["markdown-knowledge-hub.exe".into()]));
+        assert!(wants_mcp(&[
+            "markdown-knowledge-hub.exe".into(),
+            "mcp".into()
+        ]));
+        assert!(!wants_mcp(&[
+            "markdown-knowledge-hub.exe".into(),
+            "--data-dir".into(),
+            r"D:\mcp".into()
+        ]));
     }
 }
