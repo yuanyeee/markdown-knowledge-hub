@@ -742,11 +742,26 @@ blockquote {
   background: #fff;
 }
 
+.link-graph {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.link-graph h2 {
+  margin: 0 0 6px;
+}
+
+.link-graph > .hint {
+  margin: 0 0 10px;
+}
+
 .link-graph-controls {
   display: flex;
   gap: 8px;
+  align-items: center;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .link-graph-controls button {
@@ -757,13 +772,64 @@ blockquote {
   color: #245f4c;
 }
 
+.graph-legend {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.graph-legend .legend-item.incoming {
+  color: #9e4d18;
+}
+
+.graph-legend .legend-item.center {
+  color: #9b6c19;
+}
+
+.graph-legend .legend-item.outgoing {
+  color: #1f5c99;
+}
+
+.graph-zoom-readout {
+  min-width: 4.5ch;
+  text-align: center;
+  font-size: 12.5px;
+  color: #365068;
+}
+
 .graph-canvas {
-  height: 480px;
+  flex: 1;
+  min-height: 340px;
+  height: 440px;
   position: relative;
   max-width: 100%;
   border: 1px solid #e4eae8;
   border-radius: 8px;
   background: #fcfefd;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.graph-canvas:active {
+  cursor: grabbing;
+}
+
+.graph-svg {
+  display: block;
+  font-family: Inter, "Yu Gothic UI", Meiryo, sans-serif;
+}
+
+.graph-svg text {
+  font-family: inherit;
+}
+
+.graph-card.clickable-card {
+  cursor: pointer;
 }
 
 /* Expand the tabs and all three reading panes as one workspace. */
