@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   GRAPH_LABEL,
   buildGraphLayout,
@@ -137,8 +144,8 @@ export function GraphView({
     (w: number, h: number) => {
       if (!layout.nodes.length || w <= 0 || h <= 0) return;
       const { minX, minY, width: bw, height: bh } = layout.bounds;
-      const fitScale = Math.min(w / bw, h / bh, 1.15);
-      const scale = Math.max(0.18, fitScale);
+      const scale = Math.min((w - 16) / bw, (h - 16) / bh, 1.15);
+      if (!(scale > 0)) return;
       const cx = minX + bw / 2;
       const cy = minY + bh / 2;
       setTransform({
@@ -150,12 +157,12 @@ export function GraphView({
     [layout],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const updateSize = () => {
-      const w = el.clientWidth;
-      const h = el.clientHeight;
+      const w = Math.floor(el.clientWidth);
+      const h = Math.floor(el.clientHeight);
       if (w > 0 && h > 0) {
         setViewportSize((prev) =>
           prev.width === w && prev.height === h ? prev : { width: w, height: h },
@@ -166,9 +173,9 @@ export function GraphView({
     const observer = new ResizeObserver(updateSize);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [data]);
+  }, [data, expanded]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     fitView(viewportSize.width, viewportSize.height);
   }, [fitView, viewportSize.width, viewportSize.height]);
 
@@ -313,8 +320,8 @@ export function GraphView({
         {layout.nodes.length > 0 && (
           <svg
             className="graph-svg"
-            width="100%"
-            height="100%"
+            width={viewportSize.width}
+            height={viewportSize.height}
             aria-label="関係図キャンバス"
           >
             <defs>
