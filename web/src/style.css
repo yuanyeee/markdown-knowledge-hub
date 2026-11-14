@@ -742,10 +742,18 @@ blockquote {
   background: #fff;
 }
 
+.workspace > main:has(.link-graph) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .link-graph {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
 }
 
 .link-graph h2 {
@@ -801,9 +809,8 @@ blockquote {
 }
 
 .graph-canvas {
-  flex: 1;
-  min-height: 340px;
-  height: 440px;
+  flex: 1 1 auto;
+  min-height: 240px;
   position: relative;
   max-width: 100%;
   border: 1px solid #e4eae8;
@@ -822,6 +829,12 @@ blockquote {
 .graph-svg {
   display: block;
   font-family: Inter, "Yu Gothic UI", Meiryo, sans-serif;
+}
+
+.link-graph details {
+  flex: none;
+  max-height: 18%;
+  overflow: auto;
 }
 
 .graph-svg text {
