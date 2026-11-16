@@ -203,7 +203,7 @@ export function ProjectManager({
         >
           再作成
         </button>
-        {isTauri() && current?.root.includes('File-Wiki-') && (
+        {isTauri() && current && (
           <button
             disabled={pending || mode !== null}
             onClick={() =>

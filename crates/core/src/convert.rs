@@ -13,6 +13,7 @@ use std::{
 const MAX_FILE: u64 = 20 * 1024 * 1024;
 const MAX_ENTRY: u64 = 8 * 1024 * 1024;
 const TEMPLATE_TYPES: [&str; 3] = ["文書", "表", "スライド"];
+pub(crate) const CONVERTED_PREFIX: &str = "file-convert";
 
 #[derive(Debug, Serialize)]
 pub struct ConvertReport {
@@ -206,10 +207,44 @@ impl crate::Hub {
             .find(|project| project.id == id)
             .context("プロジェクトが見つかりません")?;
         let root = PathBuf::from(project.root);
-        let report = append_file_wiki(files, &root)?;
+        if root.join("file-wiki.json").is_file() {
+            let report = append_file_wiki(files, &root)?;
+            self.scan(id)?;
+            return Ok(report);
+        }
+        ensure!(
+            !root.join(CONVERTED_PREFIX).exists(),
+            "入力フォルダーに file-convert があるため、変換ページを追加できません"
+        );
+        let destination = self.dir(id)?.join("converted");
+        let report = if destination.join("file-wiki.json").is_file() {
+            append_file_wiki(files, &destination)?
+        } else {
+            ensure!(!destination.exists(), "変換ページの保存先が不正です");
+            compile_file_wiki(files, &destination)?
+        };
         self.scan(id)?;
         Ok(report)
     }
+}
+
+pub(crate) fn converted_markdown_relative(relative: &str) -> bool {
+    match relative.split('/').collect::<Vec<_>>().as_slice() {
+        ["index.md"] | ["log.md"] => true,
+        ["pages", name] => valid_converted_page(name),
+        _ => false,
+    }
+}
+
+pub(crate) fn valid_converted_page(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".md") else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem.chars().count() <= 120
+        && stem
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
 }
 
 fn build_pages(files: &[PathBuf], used: &BTreeSet<String>) -> Result<Vec<Page>> {
@@ -1120,5 +1155,93 @@ mod tests {
         fs::write(&broken, "---\ntype: \"別\"\n---\n# 別\n").unwrap();
         let messages = validate_okf_bundle(&wiki).unwrap();
         assert!(messages.iter().any(|message| message.contains("type")));
+    }
+
+    #[test]
+    fn adds_pages_to_an_existing_project_without_changing_its_markdown() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("notes");
+        fs::create_dir(&source)?;
+        let original = source.join("keep.md");
+        fs::write(&original, "# Keep\n\n既存の本文\n")?;
+        let bytes = fs::read(&original)?;
+        let mut hub = crate::Hub::open(&temp.path().join("settings"))?;
+        hub.register("demo", "Demo", &source)?;
+        hub.scan("demo")?;
+        let extra = temp.path().join("extra.txt");
+        fs::write(&extra, "変換された記録\n")?;
+        let report = hub.add_converted_files("demo", &[extra])?;
+        assert_eq!(report.pages, 1);
+        assert_eq!(fs::read(&original)?, bytes);
+        assert!(!source.join("converted").exists());
+        assert!(!source.join(CONVERTED_PREFIX).exists());
+        let page = "file-convert/pages/extra.md";
+        let document = hub.document("demo", page)?;
+        assert!(document.markdown.contains("type: \"文書\""));
+        assert!(document.markdown.contains("変換された記録"));
+        assert!(
+            hub.search("demo", "既存の本文")?
+                .iter()
+                .any(|hit| hit.path == "keep.md")
+        );
+        hub.rebuild("demo")?;
+        assert!(!hub.document("demo", page)?.title.is_empty());
+        assert!(
+            hub.document("demo", page)?
+                .markdown
+                .contains("変換された記録")
+        );
+        let more = temp.path().join("more.txt");
+        fs::write(&more, "二枚目\n")?;
+        hub.add_converted_files("demo", &[more])?;
+        assert!(
+            hub.document("demo", "file-convert/pages/more.md")?
+                .markdown
+                .contains("二枚目")
+        );
+        assert!(
+            hub.document("demo", page)?
+                .markdown
+                .contains("変換された記録")
+        );
+        fs::write(&original, "# Keep\n\n既存の本文を更新\n")?;
+        hub.scan_paths("demo", &["keep.md".into()])?;
+        assert!(
+            hub.document("demo", "keep.md")?
+                .markdown
+                .contains("既存の本文を更新")
+        );
+        assert!(
+            hub.document("demo", page)?
+                .markdown
+                .contains("変換された記録")
+        );
+        let moved = temp.path().join("moved");
+        fs::create_dir(&moved)?;
+        hub.move_output("demo", &moved)?;
+        hub.rebuild("demo")?;
+        assert!(
+            hub.document("demo", page)?
+                .markdown
+                .contains("変換された記録")
+        );
+        assert!(
+            hub.document("demo", "file-convert/pages/more.md")?
+                .markdown
+                .contains("二枚目")
+        );
+        assert!(fs::read_to_string(&original)?.contains("既存の本文を更新"));
+        let output = hub.dir("demo")?;
+        crate::outputs::validate_tree(&output)?;
+        fs::write(output.join("converted").join("stray.txt"), "x")?;
+        assert!(crate::outputs::validate_tree(&output).is_err());
+        let blocked = temp.path().join("blocked");
+        fs::create_dir_all(blocked.join(CONVERTED_PREFIX))?;
+        fs::write(blocked.join("keep.md"), "# Keep\n")?;
+        hub.register("other", "Other", &blocked)?;
+        let rejected = temp.path().join("rejected.txt");
+        fs::write(&rejected, "入らない\n")?;
+        assert!(hub.add_converted_files("other", &[rejected]).is_err());
+        Ok(())
     }
 }
