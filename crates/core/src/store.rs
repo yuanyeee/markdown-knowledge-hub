@@ -350,32 +350,18 @@ impl Hub {
         }
         let mut seen = HashSet::new();
         let mut candidates = vec![];
-        let mut files = vec![];
-        if let Some(paths) = paths {
+        let files = if let Some(paths) = paths {
+            let mut files = Vec::new();
             for path in paths {
-                if let Some(file) = event_file(&root, path)? {
-                    files.push(file);
+                if let Some((full, metadata)) = event_file(&root, path)? {
+                    files.push((path.clone(), full, metadata));
                 }
             }
+            files
         } else {
-            for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-                let entry = entry?;
-                if entry.file_type().is_file()
-                    && entry
-                        .path()
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-                {
-                    files.push((entry.path().to_path_buf(), entry.metadata()?));
-                }
-            }
-        }
-        for (full, m) in files {
-            let path = full
-                .strip_prefix(&root)?
-                .to_str()
-                .context("Unicodeパスが必要です")?
-                .replace('\\', "/");
+            indexed_markdown(&root, &self.dir(id)?)?
+        };
+        for (path, full, m) in files {
             let mtime = m
                 .modified()?
                 .duration_since(UNIX_EPOCH)?
@@ -727,6 +713,66 @@ impl Hub {
     pub fn watch(&mut self, id: &str) -> Result<()> {
         crate::watch::run(self, id)
     }
+}
+
+pub(crate) fn indexed_markdown(
+    root: &Path,
+    output: &Path,
+) -> Result<Vec<(String, PathBuf, std::fs::Metadata)>> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
+            let path = entry
+                .path()
+                .strip_prefix(root)?
+                .to_str()
+                .context("Unicodeパスが必要です")?
+                .replace('\\', "/");
+            if seen.insert(path.clone()) {
+                files.push((path, entry.path().to_path_buf(), entry.metadata()?));
+            }
+        }
+    }
+    let converted = output.join("converted");
+    if converted.is_dir() {
+        for entry in walkdir::WalkDir::new(&converted).follow_links(false) {
+            let entry = entry?;
+            if entry.file_type().is_symlink() {
+                bail!("変換ページ内のリンクは索引しません");
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&converted)?
+                .to_str()
+                .context("Unicodeパスが必要です")?
+                .replace('\\', "/");
+            if !crate::convert::converted_markdown_relative(&relative) {
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                {
+                    bail!("変換ページの構成が不正です: {relative}");
+                }
+                continue;
+            }
+            let path = format!("{}/{relative}", crate::convert::CONVERTED_PREFIX);
+            if seen.insert(path.clone()) {
+                files.push((path, entry.path().to_path_buf(), entry.metadata()?));
+            }
+        }
+    }
+    Ok(files)
 }
 
 /// Apply the same filesystem guard before either targeted updates or migration fallback.

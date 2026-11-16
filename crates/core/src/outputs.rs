@@ -140,7 +140,8 @@ pub(crate) fn validate_tree(path: &Path) -> Result<()> {
         let name = parts.last().context("出力構成が不正です")?;
         let search = parts.len() >= 2 && parts[parts.len() - 2] == "search";
         let valid = if entry.file_type().is_dir() {
-            (parts.len() == 1 && matches!(name.as_str(), "search" | "generations"))
+            (parts.len() == 1 && matches!(name.as_str(), "search" | "generations" | "converted"))
+                || (parts.len() == 2 && parts[0] == "converted" && name == "pages")
                 || (parts.len() == 2 && parts[0] == "generations" && valid_generation(name))
                 || (parts.len() == 3
                     && parts[0] == "generations"
@@ -151,6 +152,10 @@ pub(crate) fn validate_tree(path: &Path) -> Result<()> {
                 name.as_str(),
                 "meta.json" | ".managed.json" | ".tantivy-meta.lock" | ".tantivy-writer.lock"
             ) || segment.is_match(name)
+        } else if parts.len() == 2 && parts[0] == "converted" {
+            matches!(name.as_str(), "index.md" | "log.md" | "file-wiki.json")
+        } else if parts.len() == 3 && parts[0] == "converted" && parts[1] == "pages" {
+            crate::convert::valid_converted_page(name)
         } else {
             parts.len() == 1
                 && (matches!(
@@ -169,6 +174,29 @@ pub(crate) fn validate_tree(path: &Path) -> Result<()> {
             "アプリ以外のファイルがあります。移動・削除を中断しました: {}",
             relative.display()
         );
+    }
+    Ok(())
+}
+fn copy_converted_bundle(source_output: &Path, target: &Path) -> Result<()> {
+    let from = source_output.join("converted");
+    if !from.exists() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(&from).follow_links(false) {
+        let entry = entry?;
+        ensure!(
+            !entry.file_type().is_symlink(),
+            "変換ページ内のリンクは移動できません"
+        );
+        let relative = entry.path().strip_prefix(source_output)?;
+        let dest = target.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest)?;
+            continue;
+        }
+        ensure!(entry.file_type().is_file(), "変換ページの構成が不正です");
+        fs::create_dir_all(dest.parent().context("変換ページの保存先が不正です")?)?;
+        fs::copy(entry.path(), dest)?;
     }
     Ok(())
 }
@@ -470,6 +498,7 @@ impl Hub {
             );
             fs::copy(e.path(), search.join(e.file_name()))?;
         }
+        copy_converted_bundle(&base, target)?;
         let db = Connection::open_with_flags(
             target.join("metadata.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

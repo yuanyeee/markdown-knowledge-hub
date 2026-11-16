@@ -216,34 +216,19 @@ impl Hub {
             .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
         let root = self.root(id)?;
         let mut seen = 0;
-        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-            let entry = entry?;
-            if entry.file_type().is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        for (path, _, metadata) in crate::store::indexed_markdown(&root, &self.dir(id)?)? {
+            let stamp = metadata
+                .modified()?
+                .duration_since(UNIX_EPOCH)?
+                .as_nanos()
+                .to_string();
+            if !old
+                .get(&path)
+                .is_some_and(|(size, time)| *size == metadata.len() && *time == stamp)
             {
-                let path = entry
-                    .path()
-                    .strip_prefix(&root)?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("Unicodeパスが必要です"))?
-                    .replace('\\', "/");
-                let metadata = entry.metadata()?;
-                let stamp = metadata
-                    .modified()?
-                    .duration_since(UNIX_EPOCH)?
-                    .as_nanos()
-                    .to_string();
-                if !old
-                    .get(&path)
-                    .is_some_and(|(size, time)| *size == metadata.len() && *time == stamp)
-                {
-                    return Ok(None);
-                }
-                seen += 1;
+                return Ok(None);
             }
+            seen += 1;
         }
         Ok((seen == old.len()).then_some(seen))
     }
