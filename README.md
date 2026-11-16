@@ -67,7 +67,7 @@ cargo run -p hub-app -- --data .hub serve --web-dir web/dist --admin
 
 ## ファイルからWikiを作る
 
-`.docx`、`.xlsx`、`.pptx`、`.html`、`.txt`、`.csv` を選ぶと、出力先に OKF v0.2 の Markdown を生成して索引します。元のファイルは変更しません。概念ページには `文書`、`表`、`スライド` のいずれかの type と `generated.by: process:file-convert` を付け、`index.md` と `log.md` は概念グラフに入れません。
+`.docx`、`.xlsx`、`.pptx`、`.html`、`.txt`、`.csv` を選ぶと、出力先に OKF v0.2 の Markdown を生成して索引します。元のファイルは変更しません。大きい Excel は全セルを展開せず、先頭部分を収録して続きがあることをページに記します。選択したファイルは、変換に失敗しても一覧から外せます。概念ページには `文書`、`表`、`スライド` のいずれかの type と `generated.by: process:file-convert` を付け、`index.md` と `log.md` は概念グラフに入れません。
 
 デスクトップの新規プロジェクトで「ファイルを選んでWikiを生成」を選びます。開いているプロジェクトでは「ファイルをWikiへ追加」でページを足せます。既存の原本フォルダーには書き込まず、アプリの出力フォルダーへ変換結果を置いて同じ索引に加えます。再作成後もそのページは残ります。変換で作ったWikiへ追加する場合は、そのWikiフォルダーのページを更新します。
 
