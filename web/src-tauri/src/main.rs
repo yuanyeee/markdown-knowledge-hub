@@ -50,6 +50,9 @@ async fn hub_request(
             let purpose=args.get("purpose").and_then(|v|v.as_str()).unwrap_or("フォルダー");
             return Ok(serde_json::json!({"path":rfd::FileDialog::new().set_title(format!("{purpose}を選択してください")).pick_folder().map(|p|p.to_string_lossy().into_owned())}));
         }
+        if operation=="admin/pick-convert-files" {
+            return Ok(serde_json::json!({"paths":rfd::FileDialog::new().set_title("変換するファイルを選択").add_filter("文書・表・スライド", &["docx","xlsx","pptx","html","htm","txt","csv"]).pick_files()}));
+        }
         if operation=="admin/pick-md-files" {
             return Ok(serde_json::json!({"paths":rfd::FileDialog::new().set_title("Markdownファイルを選択").add_filter("Markdown", &["md"]).pick_files()}));
         }

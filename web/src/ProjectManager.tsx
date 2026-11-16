@@ -18,7 +18,7 @@ type Retired = {
   path: string;
 };
 
-type ProjectKind = 'markdown' | 'oml' | 'files' | 'md-files';
+type ProjectKind = 'markdown' | 'oml' | 'files' | 'md-files' | 'convert';
 
 type Props = {
   current?: Project;
@@ -38,7 +38,7 @@ export function ProjectManager({
   const [kind, setKind] = useState<ProjectKind>('oml');
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const oml = kind === 'oml' || kind === 'files';
-  const filesMode = kind === 'files' || kind === 'md-files';
+  const filesMode = kind === 'files' || kind === 'md-files' || kind === 'convert';
   const [mode, setMode] = useState<'create' | 'open' | null>(null);
   const [id, setId] = useState('');
   const [customId, setCustomId] = useState('');
@@ -203,6 +203,28 @@ export function ProjectManager({
         >
           再作成
         </button>
+        {isTauri() && current?.root.includes('File-Wiki-') && (
+          <button
+            disabled={pending || mode !== null}
+            onClick={() =>
+              void perform(async () => {
+                const picked = await command('pick-convert-files');
+                const files = Array.isArray(picked.paths)
+                  ? (picked.paths as string[])
+                  : [];
+                if (!files.length || !current) return;
+                await command('add-converted', {
+                  project: current.id,
+                  files,
+                });
+                await onChanged(current.id);
+                setMessage('選んだファイルをWikiへ追加しました。');
+              }, 'ファイルを変換してWikiへ追加しています…')
+            }
+          >
+            ファイルをWikiへ追加
+          </button>
+        )}
         <button
           className="danger"
           disabled={!current || pending || mode !== null}
@@ -232,7 +254,9 @@ export function ProjectManager({
                   ? { oml_files: selectedFiles }
                   : kind === 'md-files'
                     ? { md_files: selectedFiles }
-                    : {}),
+                    : kind === 'convert'
+                      ? { convert_files: selectedFiles }
+                      : {}),
               });
               await onChanged(targetId);
               setMode(null);
@@ -284,6 +308,7 @@ export function ProjectManager({
                 <>
                   <option value="md-files">Markdownファイルを複数選択</option>
                   <option value="files">OMLファイルを選んでWikiを生成</option>
+                  <option value="convert">ファイルを選んでWikiを生成</option>
                 </>
               )}
             </select>
@@ -316,7 +341,11 @@ export function ProjectManager({
                 onClick={() =>
                   void perform(async () => {
                     const result = await command(
-                      kind === 'files' ? 'pick-oml-files' : 'pick-md-files',
+                      kind === 'files'
+                        ? 'pick-oml-files'
+                        : kind === 'convert'
+                          ? 'pick-convert-files'
+                          : 'pick-md-files',
                     );
                     if (Array.isArray(result.paths)) {
                       setSelectedFiles(result.paths as string[]);
@@ -325,7 +354,12 @@ export function ProjectManager({
                   }, 'ファイルを選択しています…')
                 }
               >
-                {kind === 'files' ? 'OML' : 'Markdown'}ファイルを選択（複数可）
+                {kind === 'files'
+                  ? 'OML'
+                  : kind === 'convert'
+                    ? '変換する'
+                    : 'Markdown'}
+                ファイルを選択（複数可）
               </button>
               <p>{selectedFiles.length}件選択</p>
               <ul>
@@ -337,7 +371,9 @@ export function ProjectManager({
                 CtrlまたはShiftを押しながら複数選べます。
                 {kind === 'files'
                   ? 'OML Utilitiesのoml.exeをアプリと同じフォルダーに置いてください。'
-                  : '選んだファイルのコピーを索引化します。'}
+                  : kind === 'convert'
+                    ? 'docx、xlsx、pptx、html、txt、csv を OKF の Wiki に変換します。元のファイルは変更しません。'
+                    : '選んだファイルのコピーを索引化します。'}
               </p>
             </>
           ) : (

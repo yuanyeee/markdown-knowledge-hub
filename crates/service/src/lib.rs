@@ -100,7 +100,14 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             let id = text(args, "id")?;
             let original = Path::new(text(args, "root")?);
             let output = args.get("output").and_then(Value::as_str).map(Path::new);
-            let generated = if let Some(files) = args.get("md_files") {
+            let generated = if let Some(files) = args.get("convert_files") {
+                let files: Vec<std::path::PathBuf> = serde_json::from_value(files.clone())?;
+                Some(hub.prepare_file_wiki(
+                    id,
+                    &files,
+                    output.context("出力の親フォルダーを選択してください")?,
+                )?)
+            } else if let Some(files) = args.get("md_files") {
                 let files: Vec<std::path::PathBuf> = serde_json::from_value(files.clone())?;
                 Some(hub.prepare_markdown_selection(
                     id,
@@ -144,6 +151,11 @@ pub fn call(hub: &mut Hub, operation: &str, args: &Value) -> Result<Value> {
             json!({"removed": text(args, "key")?})
         }
         "admin/rebuild" => serde_json::to_value(hub.rebuild(text(args, "project")?)?)?,
+        "admin/add-converted" => {
+            let files: Vec<std::path::PathBuf> =
+                serde_json::from_value(args.get("files").cloned().unwrap_or(Value::Null))?;
+            serde_json::to_value(hub.add_converted_files(text(args, "project")?, &files)?)?
+        }
         "admin/remove" => {
             let id = text(args, "project")?;
             hub.remove(id)?;

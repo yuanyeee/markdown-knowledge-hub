@@ -118,6 +118,7 @@ async fn manage(
         "open-output",
         "change-input",
         "cleanup-output",
+        "add-converted",
     ]
     .contains(&operation.as_str())
     {

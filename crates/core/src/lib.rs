@@ -704,6 +704,8 @@ mod tests {
     }
 }
 
+mod convert;
+pub use convert::{ConvertReport, compile_file_wiki, validate_okf_bundle};
 mod oml;
 pub use oml::{OmlReport, compile_oml_wiki};
 
