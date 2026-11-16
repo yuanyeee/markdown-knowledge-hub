@@ -65,6 +65,19 @@ cargo run -p hub-app -- --data .hub serve --web-dir web/dist --admin
 
 `update PROJECT docs/a.md`は対象ファイルをハッシュ検証して更新します。`rebuild PROJECT`は完全再作成です。通常のscanはサイズとmtimeを使用し、両方不変の変更を確認する場合は`scan PROJECT --verify`を使います。
 
+## ファイルからWikiを作る
+
+`.docx`、`.xlsx`、`.pptx`、`.html`、`.txt`、`.csv` を選ぶと、出力先に OKF v0.2 の Markdown を生成して索引します。元のファイルは変更しません。概念ページには `文書`、`表`、`スライド` のいずれかの type と `generated.by: process:file-convert` を付け、`index.md` と `log.md` は概念グラフに入れません。
+
+デスクトップの新規プロジェクトで「ファイルを選んでWikiを生成」を選びます。できた変換Wikiには「ファイルをWikiへ追加」でページを足せます。
+
+```powershell
+cargo run -p hub-app -- convert-to-wiki .\wiki-input .\notes.txt
+cargo run -p hub-app -- validate-okf .\wiki-input
+```
+
+`validate-okf` は `okf_version`、概念の type、テンプレートに無いキー、`index.md` のリンクを確認します。出典の通信確認はしません。
+
 ## Claude / Gemini CLI / Antigravity から使う
 
 ローカルのstdio MCPを同梱しています。公開するのは `search`（path・title・短い抜粋、最大5件）と `read`（1文書、約8KB）だけです。リンク図・管理操作・索引の全件出力はありません。通信は親プロセスとの標準入出力だけで、待受ポートは開きません。検索そのものはこのPCの索引で完結します。

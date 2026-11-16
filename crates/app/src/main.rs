@@ -22,6 +22,22 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// 選択したファイルから OKF の Wiki 入力を生成します。
+    ConvertToWiki {
+        destination: PathBuf,
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// OKF バンドルの frontmatter、テンプレート、リンクを確認します。
+    ValidateOkf {
+        root: PathBuf,
+    },
+    /// 変換Wikiへファイルを追加して索引を更新します。
+    AddConverted {
+        project: String,
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// OML UtilitiesのMarkdownからWikiを生成します。
     CompileOmlWiki {
         input: PathBuf,
@@ -112,6 +128,23 @@ async fn main() -> Result<()> {
         return hub_service::serve_mcp(&data);
     }
     let data = args.data.clone().unwrap_or_else(|| PathBuf::from(".hub"));
+    if let Command::ConvertToWiki { destination, files } = &args.command {
+        let report = hub_core::compile_file_wiki(files, destination)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        let messages = hub_core::validate_okf_bundle(destination)?;
+        if !messages.is_empty() {
+            anyhow::bail!("{}", messages.join("\n"));
+        }
+        return Ok(());
+    }
+    if let Command::ValidateOkf { root } = &args.command {
+        let messages = hub_core::validate_okf_bundle(root)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"messages": messages}))?
+        );
+        return Ok(());
+    }
     if let Command::CompileOmlWiki { input, destination } = &args.command {
         let report = hub_core::compile_oml_wiki(input, destination)?;
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -119,7 +152,13 @@ async fn main() -> Result<()> {
     }
     let mut hub = Hub::open(&data)?;
     let value = match args.command {
-        Command::CompileOmlWiki { .. } | Command::Mcp { .. } => unreachable!(),
+        Command::CompileOmlWiki { .. }
+        | Command::ConvertToWiki { .. }
+        | Command::ValidateOkf { .. }
+        | Command::Mcp { .. } => unreachable!(),
+        Command::AddConverted { project, files } => {
+            serde_json::to_value(hub.add_converted_files(&project, &files)?)?
+        }
         Command::Add {
             id,
             name,

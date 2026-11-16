@@ -502,7 +502,12 @@ impl crate::Hub {
         compile_oml_wiki(input, &destination)?;
         Ok(destination)
     }
-    fn generated_input_path(&self, id: &str, parent: &Path, prefix: &str) -> Result<PathBuf> {
+    pub(crate) fn generated_input_path(
+        &self,
+        id: &str,
+        parent: &Path,
+        prefix: &str,
+    ) -> Result<PathBuf> {
         Self::validate_id(id)?;
         let parent = parent.canonicalize()?;
         let destination = parent.join(format!("{prefix}-{id}-{}", uuid::Uuid::new_v4()));
