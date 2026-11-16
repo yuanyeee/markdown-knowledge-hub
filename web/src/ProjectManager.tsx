@@ -37,6 +37,7 @@ export function ProjectManager({
 }: Props) {
   const [kind, setKind] = useState<ProjectKind>('oml');
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [convertQueue, setConvertQueue] = useState<string[]>([]);
   const oml = kind === 'oml' || kind === 'files';
   const filesMode = kind === 'files' || kind === 'md-files' || kind === 'convert';
   const [mode, setMode] = useState<'create' | 'open' | null>(null);
@@ -87,7 +88,20 @@ export function ProjectManager({
   useEffect(() => {
     setNewInput(current?.root || '');
     setNewOutput('');
+    setConvertQueue([]);
   }, [current?.id, current?.root, current?.output]);
+
+  function mergeFiles(currentFiles: string[], picked: string[]) {
+    const next = [...currentFiles];
+    for (const path of picked) {
+      if (!next.includes(path)) next.push(path);
+    }
+    return next;
+  }
+
+  function pickedPaths(result: { paths?: unknown }) {
+    return Array.isArray(result.paths) ? (result.paths as string[]) : [];
+  }
 
   async function perform(action: () => Promise<void>, label: string) {
     setPending(true);
@@ -209,17 +223,11 @@ export function ProjectManager({
             onClick={() =>
               void perform(async () => {
                 const picked = await command('pick-convert-files');
-                const files = Array.isArray(picked.paths)
-                  ? (picked.paths as string[])
-                  : [];
-                if (!files.length || !current) return;
-                await command('add-converted', {
-                  project: current.id,
-                  files,
-                });
-                await onChanged(current.id);
-                setMessage('選んだファイルをWikiへ追加しました。');
-              }, 'ファイルを変換してWikiへ追加しています…')
+                const files = pickedPaths(picked);
+                if (!files.length) return;
+                setConvertQueue((currentFiles) => mergeFiles(currentFiles, files));
+                setMessage('');
+              }, 'ファイルを選択しています…')
             }
           >
             ファイルをWikiへ追加
@@ -235,6 +243,60 @@ export function ProjectManager({
           プロジェクトを削除
         </button>
       </div>
+
+      {convertQueue.length > 0 && current && (
+        <div className="convert-queue">
+          <p>
+            {convertQueue.length}
+            件をWikiへ追加します。失敗したファイルは外してから、もう一度追加できます。
+          </p>
+          <ul className="picked-files">
+            {convertQueue.map((path) => (
+              <li key={path}>
+                <span title={path}>{path.split(/[\\/]/).pop()}</span>
+                <button
+                  type="button"
+                  disabled={pending}
+                  onClick={() =>
+                    setConvertQueue((currentFiles) =>
+                      currentFiles.filter((item) => item !== path),
+                    )
+                  }
+                >
+                  外す
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="manager-actions">
+            <button
+              type="button"
+              disabled={pending || mode !== null}
+              onClick={() =>
+                void perform(async () => {
+                  if (!current) return;
+                  await command('add-converted', {
+                    project: current.id,
+                    files: convertQueue,
+                  });
+                  setConvertQueue([]);
+                  await onChanged(current.id);
+                  setMessage('選んだファイルをWikiへ追加しました。');
+                }, 'ファイルを変換してWikiへ追加しています…')
+              }
+            >
+              この選択を追加
+            </button>
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => setConvertQueue([])}
+            >
+              選択をやめる
+            </button>
+          </div>
+        </div>
+      )}
 
       {mode === 'create' && (
         <form
@@ -347,8 +409,11 @@ export function ProjectManager({
                           ? 'pick-convert-files'
                           : 'pick-md-files',
                     );
-                    if (Array.isArray(result.paths)) {
-                      setSelectedFiles(result.paths as string[]);
+                    const files = pickedPaths(result);
+                    if (files.length) {
+                      setSelectedFiles((currentFiles) =>
+                        mergeFiles(currentFiles, files),
+                      );
                     }
                     setMessage('');
                   }, 'ファイルを選択しています…')
@@ -359,12 +424,26 @@ export function ProjectManager({
                   : kind === 'convert'
                     ? '変換する'
                     : 'Markdown'}
-                ファイルを選択（複数可）
+                {selectedFiles.length ? 'ファイルを追加' : 'ファイルを選択'}
+                （複数可）
               </button>
               <p>{selectedFiles.length}件選択</p>
-              <ul>
+              <ul className="picked-files">
                 {selectedFiles.map((path) => (
-                  <li key={path}>{path.split(/[\\/]/).pop()}</li>
+                  <li key={path}>
+                    <span title={path}>{path.split(/[\\/]/).pop()}</span>
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() =>
+                        setSelectedFiles((currentFiles) =>
+                          currentFiles.filter((item) => item !== path),
+                        )
+                      }
+                    >
+                      外す
+                    </button>
+                  </li>
                 ))}
               </ul>
               <p className="hint">
@@ -372,7 +451,7 @@ export function ProjectManager({
                 {kind === 'files'
                   ? 'OML Utilitiesのoml.exeをアプリと同じフォルダーに置いてください。'
                   : kind === 'convert'
-                    ? 'docx、xlsx、pptx、html、txt、csv を OKF の Wiki に変換します。元のファイルは変更しません。'
+                    ? 'docx、xlsx、pptx、html、txt、csv を OKF の Wiki に変換します。元のファイルは変更しません。大きい Excel は先頭部分を収録します。失敗しても、一覧からファイルを外せます。'
                     : '選んだファイルのコピーを索引化します。'}
               </p>
             </>

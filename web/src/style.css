@@ -609,6 +609,29 @@ blockquote {
   flex-wrap: wrap;
 }
 
+.convert-queue {
+  margin-top: 14px;
+}
+
+.picked-files {
+  list-style: none;
+  margin: 8px 0 12px;
+  padding: 0;
+}
+
+.picked-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid #e6edf0;
+}
+
+.picked-files span {
+  overflow-wrap: anywhere;
+}
+
 .manager button,
 .project-form button,
 .view-tabs button,

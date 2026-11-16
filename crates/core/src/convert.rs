@@ -12,6 +12,7 @@ use std::{
 
 const MAX_FILE: u64 = 20 * 1024 * 1024;
 const MAX_ENTRY: u64 = 8 * 1024 * 1024;
+const MAX_TABLE_CHARS: usize = 1_000_000;
 const TEMPLATE_TYPES: [&str; 3] = ["文書", "表", "スライド"];
 pub(crate) const CONVERTED_PREFIX: &str = "file-convert";
 
@@ -257,19 +258,23 @@ fn build_pages(files: &[PathBuf], used: &BTreeSet<String>) -> Result<Vec<Page>> 
             .canonicalize()
             .with_context(|| format!("ファイルが見つかりません: {}", path.display()))?;
         ensure!(path.is_file(), "ファイルを選択してください");
-        let len = path.metadata()?.len();
-        ensure!(len <= MAX_FILE, "20MBを超えるファイルは変換しません");
         let source_name = path
             .file_name()
             .and_then(|name| name.to_str())
             .context("ファイル名を読めません")?
             .to_string();
+        let len = path.metadata()?.len();
+        ensure!(
+            len <= MAX_FILE,
+            "{source_name} は20MBを超えるため変換しません"
+        );
         let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let (kind, body) = convert_file(&path, &extension)?;
+        let (kind, body) = convert_file(&path, &extension)
+            .with_context(|| format!("{source_name} を変換できません"))?;
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -487,31 +492,46 @@ fn parse_delimited(text: &str, delimiter: char) -> Vec<Vec<String>> {
 }
 
 fn render_table(rows: &[Vec<String>]) -> String {
+    render_table_capped(rows, usize::MAX).0
+}
+
+fn render_table_capped(rows: &[Vec<String>], max_chars: usize) -> (String, bool) {
     if rows.is_empty() {
-        return String::new();
+        return (String::new(), false);
     }
     let width = rows.iter().map(|row| row.len()).max().unwrap_or(0).min(32);
     let mut out = String::new();
+    let mut truncated = rows.len() > 2000;
     for (index, row) in rows.iter().take(2000).enumerate() {
         let cells: Vec<String> = (0..width)
             .map(|column| {
                 row.get(column)
-                    .map(|cell| cell.replace('|', "\\|").replace('\n', " "))
+                    .map(|cell| {
+                        let flat = cell.replace('|', "\\|").replace('\n', " ");
+                        let mut clipped: String = flat.chars().take(500).collect();
+                        if flat.chars().count() > 500 {
+                            clipped.push('…');
+                        }
+                        clipped
+                    })
                     .unwrap_or_default()
             })
             .collect();
-        out.push_str("| ");
-        out.push_str(&cells.join(" | "));
-        out.push_str(" |\n");
+        let mut line = format!("| {} |\n", cells.join(" | "));
         if index == 0 {
-            out.push('|');
+            line.push('|');
             for _ in 0..width {
-                out.push_str(" --- |");
+                line.push_str(" --- |");
             }
-            out.push('\n');
+            line.push('\n');
         }
+        if out.len().saturating_add(line.len()) > max_chars && !out.is_empty() {
+            truncated = true;
+            break;
+        }
+        out.push_str(&line);
     }
-    out
+    (out, truncated)
 }
 
 fn docx_to_markdown(path: &Path) -> Result<String> {
@@ -619,8 +639,10 @@ fn xml_events(xml: &str) -> Vec<XmlEvent> {
 }
 
 fn xlsx_to_markdown(path: &Path) -> Result<String> {
-    let shared = read_zip_text(path, "xl/sharedStrings.xml")?
-        .map(|xml| shared_strings(&xml))
+    let shared_xml = read_zip_prefix(path, "xl/sharedStrings.xml", MAX_ENTRY)?;
+    let mut truncated = shared_xml.as_ref().is_some_and(|(_, cut)| *cut);
+    let shared = shared_xml
+        .map(|(xml, _)| shared_strings(&xml))
         .unwrap_or_default();
     let names = zip_names(path)?;
     let mut sheets: Vec<String> = names
@@ -631,11 +653,25 @@ fn xlsx_to_markdown(path: &Path) -> Result<String> {
     ensure!(!sheets.is_empty(), "表が見つかりません");
     let mut out = String::new();
     for (index, name) in sheets.iter().enumerate() {
-        let xml = read_zip_text(path, name)?.unwrap_or_default();
+        if out.len() >= MAX_TABLE_CHARS {
+            truncated = true;
+            break;
+        }
+        let Some((xml, cut)) = read_zip_prefix(path, name, MAX_ENTRY)? else {
+            continue;
+        };
+        truncated |= cut;
+        let rows = sheet_rows(&xml, &shared);
+        let (table, cut) = render_table_capped(&rows, MAX_TABLE_CHARS - out.len());
+        truncated |= cut;
         out.push_str(&format!("## Sheet {}\n\n", index + 1));
-        out.push_str(&render_table(&sheet_rows(&xml, &shared)));
+        out.push_str(&table);
         out.push('\n');
     }
+    if truncated {
+        out.push_str("\n> この表は大きいため、先頭部分だけを収録しました。\n");
+    }
+    ensure!(!out.trim().is_empty(), "表が見つかりません");
     Ok(out)
 }
 
@@ -756,6 +792,16 @@ fn zip_names(path: &Path) -> Result<Vec<String>> {
 }
 
 fn read_zip_text(path: &Path, name: &str) -> Result<Option<String>> {
+    let Some((text, truncated)) = read_zip_prefix(path, name, MAX_ENTRY)? else {
+        return Ok(None);
+    };
+    ensure!(!truncated, "展開後の本文が大きすぎます");
+    Ok(Some(text))
+}
+
+/// Read at most `limit` uncompressed bytes. Oversized spreadsheet parts are truncated
+/// instead of failing the whole selection.
+fn read_zip_prefix(path: &Path, name: &str, limit: u64) -> Result<Option<(String, bool)>> {
     let file = fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file).context("Officeファイルを開けません")?;
     let index = match archive
@@ -766,13 +812,17 @@ fn read_zip_text(path: &Path, name: &str) -> Result<Option<String>> {
         None => return Ok(None),
     };
     let entry = archive.by_index(index)?;
-    ensure!(entry.size() <= MAX_ENTRY, "展開後の本文が大きすぎます");
-    let mut text = String::new();
+    let size = entry.size();
+    let mut bytes = Vec::new();
     entry
-        .take(MAX_ENTRY)
-        .read_to_string(&mut text)
-        .context("本文の文字コードを読めません")?;
-    Ok(Some(text))
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .context("本文を読み取れません")?;
+    let truncated = size > limit || (size == 0 && bytes.len() as u64 == limit);
+    Ok(Some((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    )))
 }
 
 fn write_pages(destination: &Path, pages: &[Page]) -> Result<()> {
@@ -1098,11 +1148,9 @@ mod tests {
                 .unwrap()
                 .contains("決定事項")
         );
-        assert!(
-            fs::read_to_string(wiki.join("pages/grid.md"))
-                .unwrap()
-                .contains("見出し")
-        );
+        let grid = fs::read_to_string(wiki.join("pages/grid.md")).unwrap();
+        assert!(grid.contains("見出し"));
+        assert!(!grid.contains("先頭部分だけを収録"));
         assert!(
             fs::read_to_string(wiki.join("pages/deck.md"))
                 .unwrap()
@@ -1243,5 +1291,33 @@ mod tests {
         fs::write(&rejected, "入らない\n")?;
         assert!(hub.add_converted_files("other", &[rejected]).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn oversized_excel_keeps_the_leading_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("large.xlsx");
+        let row = "<row><c r=\"A1\" t=\"inlineStr\"><is><t>記録</t></is></c></row>";
+        let mut sheet = String::from("<worksheet><sheetData>");
+        while sheet.len() <= 8 * 1024 * 1024 {
+            sheet.push_str(row);
+        }
+        sheet.push_str("</sheetData></worksheet>");
+        write_office(
+            &path,
+            &[
+                ("xl/sharedStrings.xml", "<sst><si><t>見出し</t></si></sst>"),
+                ("xl/worksheets/sheet1.xml", &sheet),
+                (
+                    "xl/worksheets/sheet2.xml",
+                    r#"<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>後半</t></is></c></row></sheetData></worksheet>"#,
+                ),
+            ],
+        );
+        let markdown = xlsx_to_markdown(&path).unwrap();
+        assert!(markdown.contains("記録"));
+        assert!(markdown.contains("後半"));
+        assert!(markdown.contains("先頭部分だけを収録"));
+        assert!(markdown.len() < 16 * 1024 * 1024);
     }
 }
